@@ -1,0 +1,19 @@
+
+[package]
+name = "bevy_wheel_menu"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = { version = "0.18", default-features = true }
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
+bevy_tweening = "0.14"
+
+[[example]]
+name = "gamepad"
+path = "examples/gamepad.rs"
+
+[[example]]
+name = "fps"
+path = "examples/fps.rs"
