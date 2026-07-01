@@ -1,15 +1,35 @@
-
 //! Headless wheel menu library for Bevy.
-//! 
+//!
 //! This library provides the logic and data structures for wheel menus.
 //! Rendering is left to the application.
 
-pub mod mesh;
 pub mod editor;
+pub mod mesh;
 
 use bevy::prelude::*;
+use leafwing_input_manager::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Leafwing-backed input actions for gamepad wheel navigation.
+///
+/// Attach an `InputMap<WheelNavAction>` + `ActionState<WheelNavAction>` to an entity
+/// (done automatically by `WheelMenuPlugin` via `setup_wheel_nav_input`), then read
+/// `ActionState` to drive `WheelState`.
+#[derive(Actionlike, Reflect, Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum WheelNavAction {
+    /// Right-stick direction — selects the hovered segment.
+    #[actionlike(DualAxis)]
+    Navigate,
+    /// Confirm / select hovered segment (South / A).
+    Confirm,
+    /// Cancel / close wheel (East / B).
+    Cancel,
+    /// Cycle active item forward in the hovered slot (North / Y).
+    CycleForward,
+    /// Cycle active item backward in the hovered slot (West / X).
+    CycleBack,
+}
 
 /// Configuration for a wheel menu.
 #[derive(Component, Clone)]
@@ -112,10 +132,23 @@ pub trait ActionBehavior: Send + Sync + 'static {
 /// Use [`ActionItem::Custom`] with a boxed [`ActionBehavior`] for any
 /// game-specific item not covered by the built-in variants.
 pub enum ActionItem {
-    Weapon     { name: String, icon: String },
-    Spell      { name: String, icon: String },
-    Consumable { name: String, icon: String, count: u32 },
-    Shout      { name: String, icon: String },
+    Weapon {
+        name: String,
+        icon: String,
+    },
+    Spell {
+        name: String,
+        icon: String,
+    },
+    Consumable {
+        name: String,
+        icon: String,
+        count: u32,
+    },
+    Shout {
+        name: String,
+        icon: String,
+    },
     Custom(Box<dyn ActionBehavior>),
 }
 
@@ -154,17 +187,24 @@ pub struct WheelSlot {
 
 impl WheelSlot {
     pub fn new(items: Vec<ActionItem>) -> Self {
-        Self { items, current_item: 0 }
+        Self {
+            items,
+            current_item: 0,
+        }
     }
     pub fn current(&self) -> Option<&ActionItem> {
         self.items.get(self.current_item)
     }
     pub fn cycle_next(&mut self) {
-        if self.items.is_empty() { return; }
+        if self.items.is_empty() {
+            return;
+        }
         self.current_item = (self.current_item + 1) % self.items.len();
     }
     pub fn cycle_prev(&mut self) {
-        if self.items.is_empty() { return; }
+        if self.items.is_empty() {
+            return;
+        }
         self.current_item = (self.current_item + self.items.len() - 1) % self.items.len();
     }
 }
@@ -345,13 +385,41 @@ impl Default for WheelStyle {
 
 impl WheelStyle {
     /// Convert the stored base color into a Bevy [`Color`].
-    pub fn base(&self) -> Color { Color::srgba(self.base_color[0], self.base_color[1], self.base_color[2], self.base_color[3]) }
+    pub fn base(&self) -> Color {
+        Color::srgba(
+            self.base_color[0],
+            self.base_color[1],
+            self.base_color[2],
+            self.base_color[3],
+        )
+    }
     /// Convert the stored hover color into a Bevy [`Color`].
-    pub fn hover(&self) -> Color { Color::srgba(self.hover_color[0], self.hover_color[1], self.hover_color[2], self.hover_color[3]) }
+    pub fn hover(&self) -> Color {
+        Color::srgba(
+            self.hover_color[0],
+            self.hover_color[1],
+            self.hover_color[2],
+            self.hover_color[3],
+        )
+    }
     /// Convert the stored selected color into a Bevy [`Color`].
-    pub fn selected(&self) -> Color { Color::srgba(self.selected_color[0], self.selected_color[1], self.selected_color[2], self.selected_color[3]) }
+    pub fn selected(&self) -> Color {
+        Color::srgba(
+            self.selected_color[0],
+            self.selected_color[1],
+            self.selected_color[2],
+            self.selected_color[3],
+        )
+    }
     /// Convert the stored text color into a Bevy [`Color`].
-    pub fn text(&self) -> Color { Color::srgba(self.text_color[0], self.text_color[1], self.text_color[2], self.text_color[3]) }
+    pub fn text(&self) -> Color {
+        Color::srgba(
+            self.text_color[0],
+            self.text_color[1],
+            self.text_color[2],
+            self.text_color[3],
+        )
+    }
 }
 
 /// Sound asset paths a wheel plays on lifecycle events.  Attach to a wheel
@@ -625,7 +693,7 @@ pub type ActionWheelPlugin = WheelMenuPlugin;
 
 impl Plugin for WheelMenuPlugin {
     fn build(&self, app: &mut App) {
-        app
+        app.add_plugins(InputManagerPlugin::<WheelNavAction>::default())
             .init_resource::<GlobalBindings>()
             // selection messages
             .add_message::<WheelMenuSelected>()
@@ -647,38 +715,79 @@ impl Plugin for WheelMenuPlugin {
             .add_message::<WheelMenuLowCount>()
             .add_message::<WheelEditModeChanged>()
             .add_message::<WheelSliceReorder>()
-            .add_systems(Update, (
-                update_wheel_input,
-                update_wheel_hover,
-                emit_selection,
-                emit_lifecycle,
-                update_slot_cycle,
-                update_wheel_time_scale,
-                update_wheel_hold,
-                update_wheel_set,
-                check_low_counts,
-                update_edit_mode,
-                update_active_slot_context,
-                resolve_wheel_input,
-            ).chain());
+            .add_systems(Startup, setup_wheel_nav_input)
+            .add_systems(
+                Update,
+                (
+                    update_wheel_input,
+                    update_wheel_hover,
+                    emit_selection,
+                    emit_lifecycle,
+                    update_slot_cycle,
+                    update_wheel_time_scale,
+                    update_wheel_hold,
+                    update_wheel_set,
+                    check_low_counts,
+                    update_edit_mode,
+                    update_active_slot_context,
+                    resolve_wheel_input,
+                )
+                    .chain(),
+            );
     }
 }
 
-/// System that reads gamepad input and updates WheelState.
+/// Spawns the global entity that holds the [`WheelNavAction`] input map.
+/// Called once at startup by [`WheelMenuPlugin`].
+fn setup_wheel_nav_input(mut commands: Commands) {
+    commands.spawn((
+        ActionState::<WheelNavAction>::default(),
+        InputMap::<WheelNavAction>::default()
+            .with_dual_axis(WheelNavAction::Navigate, GamepadStick::RIGHT)
+            .with(WheelNavAction::Confirm, GamepadButton::South)
+            .with(WheelNavAction::Cancel, GamepadButton::East)
+            .with(WheelNavAction::CycleForward, GamepadButton::North)
+            .with(WheelNavAction::CycleBack, GamepadButton::West),
+    ));
+}
+
+/// Reads the right-stick via [`WheelNavAction::Navigate`] (leafwing) and updates every
+/// [`WheelState::dir`]. Falls back to the raw left stick when no leafwing entity exists.
 pub fn update_wheel_input(
+    nav_states: Query<&ActionState<WheelNavAction>>,
     gamepads: Query<&Gamepad>,
-    mut q: Query<&mut WheelState>,
+    mut wheel_states: Query<&mut WheelState>,
 ) {
-    for mut state in &mut q {
-        state.dir = Vec2::ZERO;
+    // Primary: right stick via leafwing
+    let mut nav_dir = Vec2::ZERO;
+    for action_state in nav_states.iter() {
+        let pair = action_state.axis_pair(&WheelNavAction::Navigate);
+        if pair.length() > 0.25 {
+            nav_dir = pair;
+            break;
+        }
+    }
+
+    // Fallback: raw left stick (keeps existing example code working)
+    if nav_dir == Vec2::ZERO {
         for gamepad in &gamepads {
             let x = gamepad.get(GamepadAxis::LeftStickX).unwrap_or(0.0);
             let y = gamepad.get(GamepadAxis::LeftStickY).unwrap_or(0.0);
             let v = Vec2::new(x, y);
             if v.length() > 0.25 {
-                state.dir = v.normalize();
+                nav_dir = v;
+                break;
             }
         }
+    }
+
+    let dir = if nav_dir.length() > 0.25 {
+        nav_dir.normalize()
+    } else {
+        Vec2::ZERO
+    };
+    for mut ws in &mut wheel_states {
+        ws.dir = dir;
     }
 }
 
@@ -687,7 +796,12 @@ pub fn update_wheel_input(
 ///   returns to centre.
 /// - [`CastingMode::Direct`]: fires [`WheelMenuSelected`] immediately on hover.
 pub fn update_wheel_hover(
-    mut q: Query<(Entity, &WheelMenu, &mut WheelState, Option<&WheelMenuConfig>)>,
+    mut q: Query<(
+        Entity,
+        &WheelMenu,
+        &mut WheelState,
+        Option<&WheelMenuConfig>,
+    )>,
     mut hover_ev: MessageWriter<WheelMenuHoverChanged>,
     mut select_ev: MessageWriter<WheelMenuSelected>,
 ) {
@@ -757,11 +871,14 @@ pub fn emit_selection(
                 if let Some(cfg) = config {
                     match cfg.casting_mode {
                         CastingMode::Vanilla => {} // fall through
-                        _ => continue,              // another mode is active
+                        _ => continue,             // another mode is active
                     }
                 }
                 if let Some(i) = state.hovered {
-                    ev.write(WheelMenuSelected { index: i, menu_entity: entity });
+                    ev.write(WheelMenuSelected {
+                        index: i,
+                        menu_entity: entity,
+                    });
                 }
             }
         }
@@ -781,10 +898,14 @@ pub fn emit_lifecycle(
         let is_open = state.hovered.is_some();
         if is_open && !state.open {
             state.open = true;
-            opened_ev.write(WheelOpened { menu_entity: entity });
+            opened_ev.write(WheelOpened {
+                menu_entity: entity,
+            });
         } else if !is_open && state.open {
             state.open = false;
-            closed_ev.write(WheelClosed { menu_entity: entity });
+            closed_ev.write(WheelClosed {
+                menu_entity: entity,
+            });
         }
     }
 }
@@ -801,14 +922,20 @@ pub fn update_slot_cycle(
     for gamepad in &gamepads {
         let next = gamepad.just_pressed(GamepadButton::RightThumb);
         let prev = gamepad.just_pressed(GamepadButton::LeftThumb);
-        if !next && !prev { continue; }
+        if !next && !prev {
+            continue;
+        }
 
         for (menu_entity, state) in &wheel_q {
             if let Some(hovered) = state.hovered {
                 for (slice, mut slot) in &mut slot_q {
                     if slice.index == hovered {
                         let previous_item = slot.current_item;
-                        if next { slot.cycle_next(); } else { slot.cycle_prev(); }
+                        if next {
+                            slot.cycle_next();
+                        } else {
+                            slot.cycle_prev();
+                        }
                         if slot.current_item != previous_item {
                             ev.write(WheelSlotItemChanged {
                                 slot_index: hovered,
@@ -827,15 +954,12 @@ pub fn update_slot_cycle(
 /// Applies the configured time scale to [`Time<Virtual>`] based on each
 /// [`WheelMenuConfig::time_mode`].  When multiple wheel entities are alive the
 /// most restrictive (lowest) scale wins.
-pub fn update_wheel_time_scale(
-    q: Query<&WheelMenuConfig>,
-    mut time: ResMut<Time<Virtual>>,
-) {
+pub fn update_wheel_time_scale(q: Query<&WheelMenuConfig>, mut time: ResMut<Time<Virtual>>) {
     let effective = q.iter().fold(1.0_f32, |acc, cfg| {
         let scale = match cfg.time_mode {
-            TimeMode::Normal  => 1.0,
+            TimeMode::Normal => 1.0,
             TimeMode::Slow(s) => s,
-            TimeMode::Pause   => 0.0,
+            TimeMode::Pause => 0.0,
         };
         acc.min(scale)
     });
@@ -856,13 +980,13 @@ pub fn update_wheel_hold(
             CastingMode::HoldToActivate { duration } => duration,
             _ => {
                 hold.progress = 0.0;
-                hold.holding  = false;
+                hold.holding = false;
                 continue;
             }
         };
         match state.hovered {
             Some(index) => {
-                hold.holding  = true;
+                hold.holding = true;
                 hold.progress = (hold.progress + time.delta_secs() / duration).clamp(0.0, 1.0);
                 progress_ev.write(WheelMenuHoldProgress {
                     index,
@@ -870,12 +994,15 @@ pub fn update_wheel_hold(
                     menu_entity: entity,
                 });
                 if hold.progress >= 1.0 {
-                    activate_ev.write(WheelMenuHoldActivated { index, menu_entity: entity });
+                    activate_ev.write(WheelMenuHoldActivated {
+                        index,
+                        menu_entity: entity,
+                    });
                     hold.progress = 0.0;
                 }
             }
             None => {
-                hold.holding  = false;
+                hold.holding = false;
                 hold.progress = 0.0;
             }
         }
@@ -897,12 +1024,20 @@ pub fn update_wheel_set(
             if gamepad.just_pressed(set.next_button) {
                 let previous = set.active;
                 set.active = (set.active + 1) % set.count;
-                ev.write(WheelSwitched { previous, current: set.active, menu_entity: entity });
+                ev.write(WheelSwitched {
+                    previous,
+                    current: set.active,
+                    menu_entity: entity,
+                });
             }
             if gamepad.just_pressed(set.prev_button) {
                 let previous = set.active;
                 set.active = (set.active + set.count - 1) % set.count;
-                ev.write(WheelSwitched { previous, current: set.active, menu_entity: entity });
+                ev.write(WheelSwitched {
+                    previous,
+                    current: set.active,
+                    menu_entity: entity,
+                });
             }
         }
     }
@@ -960,9 +1095,7 @@ pub fn update_edit_mode(
                             menu_entity: entity,
                         });
                     }
-                    if gamepad.just_pressed(GamepadButton::DPadDown)
-                        && hovered + 1 < menu.slices
-                    {
+                    if gamepad.just_pressed(GamepadButton::DPadDown) && hovered + 1 < menu.slices {
                         reorder_ev.write(WheelSliceReorder {
                             from_index: hovered,
                             to_index: hovered + 1,
@@ -995,7 +1128,9 @@ pub fn update_active_slot_context(
         }
         match found {
             Some(slot_entity) => {
-                commands.entity(menu).insert(ActiveSlotContext { slot_entity });
+                commands
+                    .entity(menu)
+                    .insert(ActiveSlotContext { slot_entity });
             }
             None => {
                 commands.entity(menu).remove::<ActiveSlotContext>();
@@ -1013,7 +1148,11 @@ pub fn resolve_wheel_input(
     gamepads: Query<&Gamepad>,
     global: Res<GlobalBindings>,
     wheel_q: Query<
-        (Entity, Option<&WheelInputOverride>, Option<&ActiveSlotContext>),
+        (
+            Entity,
+            Option<&WheelInputOverride>,
+            Option<&ActiveSlotContext>,
+        ),
         With<WheelState>,
     >,
     slot_q: Query<&WheelInputOverride, Without<WheelState>>,
@@ -1053,7 +1192,10 @@ pub fn slice_center(menu: &WheelMenu, index: usize) -> Vec2 {
     let (a0, a1) = slice_angles(menu, index);
     let center_angle = (a0 + a1) / 2.0;
     let center_radius = (menu.inner_radius + menu.radius) / 2.0;
-    Vec2::new(center_angle.cos() * center_radius, center_angle.sin() * center_radius)
+    Vec2::new(
+        center_angle.cos() * center_radius,
+        center_angle.sin() * center_radius,
+    )
 }
 
 /// Returns a full-screen `bevy_ui` overlay [`Node`] that centers its children,
@@ -1150,6 +1292,104 @@ pub fn wheel_center_disc(radius: f32, color: Color) -> impl bevy::scene::prelude
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             border_radius: {BorderRadius::all(px(radius))},
+        }
+        BackgroundColor({color})
+    }
+}
+
+/// Like [`wheel_center_disc`] but draws a coloured ring border around the hub.
+///
+/// Use this instead of [`wheel_center_disc`] to get the golden ring shown in
+/// the reference screenshots.
+pub fn wheel_center_ring(
+    radius: f32,
+    bg: Color,
+    ring_color: Color,
+    ring_width: f32,
+) -> impl bevy::scene::prelude::Scene {
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            left: {px(-radius)},
+            top: {px(-radius)},
+            width: {px(radius * 2.0)},
+            height: {px(radius * 2.0)},
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+            border_radius: {BorderRadius::all(px(radius))},
+            border: {UiRect::all(px(ring_width))},
+        }
+        BackgroundColor({bg})
+        BorderColor::all(ring_color)
+    }
+}
+
+/// A large dark disc that fills the full wheel area, placed behind all slices.
+///
+/// Spawn as a child of [`wheel_hub`] **before** the slices so it sits at the
+/// back of the z-order.
+pub fn wheel_bg_disc(outer_radius: f32) -> impl bevy::scene::prelude::Scene {
+    let r = outer_radius + 4.0;
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            left: {px(-r)},
+            top: {px(-r)},
+            width: {px(r * 2.0)},
+            height: {px(r * 2.0)},
+            border_radius: {BorderRadius::all(px(r))},
+        }
+        BackgroundColor({Color::srgb(0.096, 0.118, 0.157)})
+    }
+}
+
+/// A thin amber/gold ring just outside the wheel — approximates the dashed
+/// outer border visible in the reference screenshots.
+pub fn wheel_outer_ring(outer_radius: f32) -> impl bevy::scene::prelude::Scene {
+    let r = outer_radius + 18.0;
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            left: {px(-r)},
+            top: {px(-r)},
+            width: {px(r * 2.0)},
+            height: {px(r * 2.0)},
+            border_radius: {BorderRadius::all(px(r))},
+            border: {UiRect::all(px(1.5))},
+        }
+        BackgroundColor({Color::NONE})
+        BorderColor::all(Color::srgba(0.75, 0.58, 0.15, 0.40))
+    }
+}
+
+/// Absolutely-positioned rectangular slice panel, sized to better fill a
+/// segment of the wheel than the square [`wheel_slice_panel_styled`].
+///
+/// `width` and `height` are in logical pixels.  Use `corner_radius` ≈
+/// `min(width, height) * 0.15` for the rounded look shown in the screenshots.
+pub fn wheel_slice_panel_rect(
+    menu: &WheelMenu,
+    index: usize,
+    width: f32,
+    height: f32,
+    color: Color,
+    corner_radius: f32,
+) -> impl bevy::scene::prelude::Scene {
+    let center = slice_center(menu, index);
+    let left = center.x - width / 2.0;
+    let top = -center.y - height / 2.0;
+    bsn! {
+        Node {
+            position_type: PositionType::Absolute,
+            left: {px(left)},
+            top: {px(top)},
+            width: {px(width)},
+            height: {px(height)},
+            justify_content: JustifyContent::SpaceBetween,
+            align_items: AlignItems::Center,
+            flex_direction: FlexDirection::Column,
+            padding: {UiRect::all(px(6.))},
+            border_radius: {BorderRadius::all(px(corner_radius))},
         }
         BackgroundColor({color})
     }

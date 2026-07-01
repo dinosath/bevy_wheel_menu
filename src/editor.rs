@@ -1,22 +1,13 @@
-//! BSN-macro Quick Action Menu editor.
+//! BSN-macro Quick Action Menu editor — v2 layout.
 //!
-//! The editor is a self-contained Bevy plugin ([`QuickActionEditorPlugin`]) that
-//! lets you author a [`QuickActionConfig`] at runtime. The document is a list of
-//! **action sets**; each set holds an ordered list of entries, where every entry
-//! is one of:
-//!
-//! - a **quick action** (a named, key-bound button),
-//! - a standalone **wheel** (a radial menu), or
-//! - a **wheel set** (a group of wheels the player can switch between).
-//!
-//! The whole left sidebar — header, `SETS` bar, the scrollable set/entry tree and
-//! the save / load footer — is declared with the [`bsn!`](bevy::prelude::bsn)
-//! macro and rebuilt only when the document or selection changes. The right-hand
-//! canvas is a live overview of every set and its children (quick actions and
-//! wheel sets); selecting a wheel swaps it to that wheel's radial preview. Each
-//! set has an inline settings submenu (name / opacity / input override), and a
-//! pinned submenu at the top of the tree configures the next / previous set-switch
-//! shortcuts.
+//! ## Layout
+//! * **Left sidebar** is context-sensitive:
+//!   - Default: **navigation view** — wheel-set tree and button list for the
+//!     active set, plus a set-switch key summary at the bottom.
+//!   - When an item is selected: **editor panel** for that item (wheel, button,
+//!     or wheel-set) with a `‹ Back` breadcrumb header.
+//! * **Right canvas** always shows the **HUD preview** — the active set's wheel
+//!   centred in the viewport, floating action buttons, and set tabs at the bottom.
 
 use crate::*;
 use bevy::color::Alpha;
@@ -28,18 +19,14 @@ use serde::{Deserialize, Serialize};
 
 // ─── document model ─────────────────────────────────────────────────────────────
 
-/// Position reference for a quick action's on-screen placement.
+/// Placement reference for a quick action's on-screen position.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug, Default)]
 pub enum PositionMode {
-    /// Positioned relative to its anchor / menu.
     #[default]
     Relative,
-    /// Positioned at an absolute screen location.
     Absolute,
 }
-
 impl PositionMode {
-    /// Short editor label.
     pub fn label(self) -> &'static str {
         match self {
             Self::Relative => "Relative",
@@ -54,22 +41,16 @@ impl PositionMode {
     }
 }
 
-/// Button shape for a quick action.
+/// Shape of a quick-action button.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug, Default)]
 pub enum ActionShape {
-    /// Rounded square (default).
     #[default]
     Rounded,
-    /// Full circle.
     Round,
-    /// Sharp square.
     Square,
-    /// Diamond.
     Diamond,
 }
-
 impl ActionShape {
-    /// Short editor label.
     pub fn label(self) -> &'static str {
         match self {
             Self::Rounded => "Rounded",
@@ -88,49 +69,171 @@ impl ActionShape {
     }
 }
 
-/// Glyphs cycled through when assigning an action icon.
-const ICON_PALETTE: &[&str] = &["◆", "●", "★", "▲", "✦", "✚", "◈", "○", "◐", "✱"];
-/// Commands cycled through when assigning an action command.
-const COMMAND_PALETTE: &[&str] =
-    &["none", "attack", "heal", "block", "dash", "reload", "interact", "jump", "crouch", "sprint"];
+/// Visual theme for a wheel.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug, Default)]
+pub enum WheelTheme {
+    #[default]
+    Dark,
+    Light,
+}
+impl WheelTheme {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+    fn next(self) -> Self {
+        match self {
+            Self::Dark => Self::Light,
+            Self::Light => Self::Dark,
+        }
+    }
+}
 
-/// Returns the element after `current` in `list` (wrapping).
+/// Shape of each segment panel in a wheel.
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, Debug, Default)]
+pub enum SegmentShape {
+    #[default]
+    Rounded,
+    Square,
+    Circle,
+    /// Asymmetric radius – outer corners large, inner corners small.
+    Wedge,
+    /// True pie / wedge mesh rendered with curved arcs (uses `Mesh2d`).
+    Pie,
+}
+impl SegmentShape {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rounded => "Rounded",
+            Self::Square => "Square",
+            Self::Circle => "Circle",
+            Self::Wedge => "Wedge",
+            Self::Pie => "Pie",
+        }
+    }
+    fn next(self) -> Self {
+        match self {
+            Self::Rounded => Self::Square,
+            Self::Square => Self::Circle,
+            Self::Circle => Self::Wedge,
+            Self::Wedge => Self::Pie,
+            Self::Pie => Self::Rounded,
+        }
+    }
+}
+
+const ICON_PALETTE: &[&str] = &["◆", "●", "★", "▲", "✦", "✚", "◈", "○", "◐", "✱"];
+const COMMAND_PALETTE: &[&str] = &[
+    "none", "attack", "heal", "block", "dash", "reload", "interact", "jump", "crouch", "sprint",
+];
+
 fn cycle_in<'a>(list: &[&'a str], current: &str) -> &'a str {
     let idx = list.iter().position(|s| *s == current).unwrap_or(0);
     list[(idx + 1) % list.len()]
 }
 
-/// A key-bound quick-action button.
+// ── serde defaults ──────────────────────────────────────────────────────────────
+
+fn default_true() -> bool {
+    true
+}
+fn default_action_color() -> String {
+    "#3b82f6".into()
+}
+fn default_action_width() -> f32 {
+    80.0
+}
+fn default_action_height() -> f32 {
+    28.0
+}
+fn default_outer_radius() -> f32 {
+    110.0
+}
+fn default_inner_radius() -> f32 {
+    38.0
+}
+fn default_anim_speed() -> f32 {
+    150.0
+}
+fn full_opacity() -> f32 {
+    1.0
+}
+fn default_highlight_color() -> String {
+    "#f59e0b".into()
+}
+fn default_segment_scale() -> f32 {
+    1.0
+}
+
+// ── slot data model ─────────────────────────────────────────────────────────────
+
+/// A single selectable item within a wheel slot (for multi-item cycling).
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+pub struct SlotItem {
+    pub name: String,
+    pub icon: String,
+}
+
+/// All per-slot data for a single wheel segment.
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+#[serde(default)]
+pub struct WheelSlotData {
+    pub name: String,
+    /// Unicode symbol / emoji shown in the wheel preview.
+    pub icon: String,
+    /// Captured input label for this slot (keyboard key or "GP:…" gamepad button).
+    pub input: String,
+    /// Optional list of items the player can cycle through.
+    pub items: Vec<SlotItem>,
+}
+
+impl WheelSlotData {
+    fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+}
+
+// ── structs ─────────────────────────────────────────────────────────────────────
+
+/// A key-bound quick-action button shown as a floating HUD element.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(default)]
 pub struct QuickAction {
-    /// Display name.
     pub name: String,
-    /// Captured key-binding label (e.g. `"X"`). Empty means unbound.
+    /// Captured keyboard key-binding label (e.g. `"E"`). Empty means unbound.
     pub key: String,
-    /// Icon glyph.
+    /// Captured gamepad button label (e.g. `"A"`). Empty means unbound.
+    #[serde(default)]
+    pub gamepad_button: String,
     pub icon: String,
-    /// Assigned command id.
     pub command: String,
-    /// Hold-to-activate (vs press).
     pub hold: bool,
-    /// Whether the action is shown on the menu.
     pub show_on_menu: bool,
-    /// Opacity multiplier, 0.0–1.0.
     pub opacity: f32,
-    /// Placement reference.
     pub position: PositionMode,
-    /// Button radius in logical pixels.
     pub radius: f32,
-    /// Button shape.
     pub shape: ActionShape,
+    /// CSS hex color for the button (e.g. `"#8b5cf6"`).
+    #[serde(default = "default_action_color")]
+    pub color: String,
+    #[serde(default = "default_action_width")]
+    pub width: f32,
+    #[serde(default = "default_action_height")]
+    pub height: f32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
-
 impl Default for QuickAction {
     fn default() -> Self {
         Self {
             name: "Action".into(),
             key: String::new(),
+            gamepad_button: String::new(),
             icon: "◆".into(),
             command: "none".into(),
             hold: false,
@@ -139,41 +242,88 @@ impl Default for QuickAction {
             position: PositionMode::Relative,
             radius: 48.0,
             shape: ActionShape::Rounded,
+            color: default_action_color(),
+            width: default_action_width(),
+            height: default_action_height(),
+            enabled: true,
         }
     }
 }
 
-/// A single radial wheel: a named menu with labelled slots and a cooldown.
+/// A radial wheel: named menu with labelled slots, configurable size / style.
 #[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(default)]
 pub struct Wheel {
-    /// Display name.
     pub name: String,
-    /// Cooldown in seconds (shown as the `Ns` badge).
     pub cooldown_secs: f32,
-    /// Slot labels. Their count is the number of slices.
-    pub slots: Vec<String>,
+    /// Per-segment data (name, icon, input binding, items).
+    pub slots: Vec<WheelSlotData>,
+    /// Key held to open / activate this wheel.
+    #[serde(default)]
+    pub hold_key: String,
+    #[serde(default)]
+    pub theme: WheelTheme,
+    #[serde(default = "default_outer_radius")]
+    pub outer_radius: f32,
+    #[serde(default = "default_inner_radius")]
+    pub inner_radius: f32,
+    #[serde(default = "default_anim_speed")]
+    pub anim_speed_ms: f32,
+    #[serde(default = "default_true")]
+    pub show_labels: bool,
+    #[serde(default)]
+    pub show_info_in_hub: bool,
+    #[serde(default)]
+    pub segment_shape: SegmentShape,
+    #[serde(default = "default_true")]
+    pub show_icon: bool,
+    #[serde(default = "default_highlight_color")]
+    pub highlight_color: String,
+    #[serde(default = "default_segment_scale")]
+    pub segment_scale: f32,
 }
-
+impl Default for Wheel {
+    fn default() -> Self {
+        Self {
+            name: "Wheel".into(),
+            cooldown_secs: 6.0,
+            slots: vec![WheelSlotData::named("Slot 1")],
+            hold_key: String::new(),
+            theme: WheelTheme::Dark,
+            outer_radius: default_outer_radius(),
+            inner_radius: default_inner_radius(),
+            anim_speed_ms: default_anim_speed(),
+            show_labels: true,
+            show_info_in_hub: false,
+            segment_shape: SegmentShape::Rounded,
+            show_icon: true,
+            highlight_color: "#f59e0b".into(),
+            segment_scale: 1.0,
+        }
+    }
+}
 impl Wheel {
-    /// A fresh wheel with `n` generic slots.
     pub fn new(name: impl Into<String>, n: usize) -> Self {
         Self {
             name: name.into(),
-            cooldown_secs: 6.0,
-            slots: (0..n.max(1)).map(|i| format!("Slot {}", i + 1)).collect(),
+            slots: (0..n.max(1))
+                .map(|i| WheelSlotData::named(format!("Slot {}", i + 1)))
+                .collect(),
+            ..Default::default()
         }
     }
-
-    /// Build a runtime [`WheelMenu`] for previewing this wheel.
+    /// Build a runtime [`WheelMenu`] using this wheel's radius settings.
     pub fn to_menu(&self) -> WheelMenu {
         WheelMenu {
             slices: self.slots.len().max(1),
-            radius: 170.0,
-            inner_radius: 58.0,
+            radius: self.outer_radius.max(40.0),
+            inner_radius: self.inner_radius.max(8.0),
             deadzone: 0.3,
-            gap: 0.03,
+            gap: 0.04,
             arc_span: std::f32::consts::TAU,
-            arc_offset: 0.0,
+            // π/6 puts the first boundary straight up so the wheel
+            // has left/right symmetry (MAP upper-left, ATTACK upper-right …).
+            arc_offset: std::f32::consts::FRAC_PI_6,
             overlap: false,
         }
     }
@@ -181,111 +331,121 @@ impl Wheel {
 
 /// A group of wheels the player can switch between.
 #[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(default)]
 pub struct WheelSet {
-    /// Display name.
     pub name: String,
-    /// The wheels in switch order.
     pub wheels: Vec<Wheel>,
+    /// Key that cycles through wheels in this set.
+    #[serde(default)]
+    pub switch_key: String,
+}
+impl Default for WheelSet {
+    fn default() -> Self {
+        Self {
+            name: "Wheel Set".into(),
+            wheels: Vec::new(),
+            switch_key: String::new(),
+        }
+    }
 }
 
 /// One entry inside an [`ActionSet`].
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub enum SetEntry {
-    /// A key-bound quick action.
     Action(QuickAction),
-    /// A standalone wheel.
     Wheel(Wheel),
-    /// A group of wheels.
     WheelSet(WheelSet),
 }
 
-/// A set of quick actions / wheels (e.g. bound to a gameplay context).
+/// A set of quick actions / wheels bound to a gameplay context.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ActionSet {
-    /// Display name.
     pub name: String,
-    /// Opacity multiplier applied to the whole set, 0.0–1.0.
     #[serde(default = "full_opacity")]
     pub opacity: f32,
-    /// When `true`, the set's binding overrides its children's input bindings.
     #[serde(default)]
     pub input_override: bool,
-    /// Ordered entries.
     pub entries: Vec<SetEntry>,
 }
 
-/// Serde default for opacity fields (fully opaque).
-fn full_opacity() -> f32 {
-    1.0
-}
-
-/// The complete editable document. Lives as a Bevy [`Resource`] and is what the
-/// editor mutates and saves / loads as RON.
+/// The complete editable document (lives as a Bevy [`Resource`]).
 #[derive(Resource, Clone, Serialize, Deserialize, Debug)]
 pub struct QuickActionConfig {
-    /// Key that switches to the next set. Empty means unbound.
     #[serde(default)]
     pub next_set_key: String,
-    /// Key that switches to the previous set. Empty means unbound.
     #[serde(default)]
     pub prev_set_key: String,
-    /// All action sets.
     pub sets: Vec<ActionSet>,
 }
 
 impl Default for QuickActionConfig {
     fn default() -> Self {
+        let mut combat_wheel = Wheel::new("Combat Wheel", 6);
+        combat_wheel.hold_key = "Q".into();
+        combat_wheel.slots = vec![
+            WheelSlotData::named("Map"),
+            WheelSlotData::named("Attack"),
+            WheelSlotData::named("Block"),
+            WheelSlotData::named("Heal"),
+            WheelSlotData::named("Ability"),
+            WheelSlotData::named("Sprint"),
+        ];
+
         Self {
             next_set_key: "Tab".into(),
             prev_set_key: "Q".into(),
             sets: vec![
                 ActionSet {
-                    name: "Set 1".into(),
+                    name: "Combat".into(),
                     opacity: 1.0,
                     input_override: false,
                     entries: vec![
+                        SetEntry::WheelSet(WheelSet {
+                            name: "Wheel Set".into(),
+                            switch_key: String::new(),
+                            wheels: vec![combat_wheel, Wheel::new("Wheel 2", 6)],
+                        }),
                         SetEntry::Action(QuickAction {
-                            name: "Quick Attack".into(),
-                            key: "X".into(),
-                            command: "attack".into(),
+                            name: "Interact".into(),
+                            key: "E".into(),
+                            icon: "◆".into(),
+                            command: "interact".into(),
+                            color: "#14b8a6".into(),
+                            width: 90.0,
+                            height: 28.0,
                             ..default()
                         }),
                         SetEntry::Action(QuickAction {
-                            name: "Heal".into(),
-                            key: "B".into(),
-                            icon: "✚".into(),
-                            command: "heal".into(),
+                            name: "Inventory".into(),
+                            key: "I".into(),
+                            icon: "◈".into(),
+                            command: "none".into(),
+                            color: "#8b5cf6".into(),
+                            width: 80.0,
+                            height: 28.0,
                             ..default()
                         }),
-                        SetEntry::Action(QuickAction { name: "Action 3".into(), ..default() }),
-                        SetEntry::Wheel(Wheel::new("Wheel 1", 6)),
                     ],
                 },
                 ActionSet {
-                    name: "Set 2".into(),
+                    name: "Stealth".into(),
                     opacity: 1.0,
                     input_override: false,
                     entries: vec![
-                        SetEntry::Action(QuickAction {
-                            name: "Quick Attack".into(),
-                            key: "X".into(),
-                            command: "attack".into(),
-                            ..default()
-                        }),
-                        SetEntry::Action(QuickAction {
-                            name: "Heal".into(),
-                            key: "B".into(),
-                            icon: "✚".into(),
-                            command: "heal".into(),
-                            ..default()
-                        }),
                         SetEntry::WheelSet(WheelSet {
-                            name: "Wheel Set 1".into(),
-                            wheels: vec![
-                                Wheel::new("Wheel 1", 6),
-                                Wheel::new("Wheel 2", 6),
-                                Wheel::new("Wheel 3", 6),
-                            ],
+                            name: "Stealth Wheels".into(),
+                            switch_key: String::new(),
+                            wheels: vec![Wheel::new("Stealth Wheel", 4)],
+                        }),
+                        SetEntry::Action(QuickAction {
+                            name: "Hide".into(),
+                            key: "H".into(),
+                            icon: "◐".into(),
+                            command: "crouch".into(),
+                            color: "#6366f1".into(),
+                            width: 70.0,
+                            height: 28.0,
+                            ..default()
                         }),
                     ],
                 },
@@ -294,60 +454,75 @@ impl Default for QuickActionConfig {
     }
 }
 
-// ─── selection & runtime state ──────────────────────────────────────────────────
+// ─── selection & runtime state ───────────────────────────────────────────────────
 
-/// What the canvas is currently focused on.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum Selection {
-    /// Nothing selected — the canvas shows its placeholder.
     #[default]
     None,
-    /// A quick action, addressed by set + entry index.
-    Action { set: usize, entry: usize },
-    /// A wheel. `wheel` is `None` for a standalone [`SetEntry::Wheel`] or
-    /// `Some(i)` for the `i`-th wheel of a [`SetEntry::WheelSet`].
-    Wheel { set: usize, entry: usize, wheel: Option<usize> },
-    /// An action set's own settings submenu (name / opacity / input override).
-    Set { set: usize },
-    /// The set-switching shortcut submenu pinned to the top of the tree.
+    Action {
+        set: usize,
+        entry: usize,
+    },
+    Wheel {
+        set: usize,
+        entry: usize,
+        wheel: Option<usize>,
+    },
+    Set {
+        set: usize,
+    },
     SetSwitch,
+    /// A [`SetEntry::WheelSet`] entry (to edit its name / switch-key).
+    WheelSetEntry {
+        set: usize,
+        entry: usize,
+    },
+    Segment {
+        set: usize,
+        entry: usize,
+        wheel: Option<usize>,
+        slot: usize,
+    },
 }
 
-/// Which inline text/key field is currently capturing input.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum EditFocus {
-    /// Nothing is capturing input.
     #[default]
     None,
-    /// The selected action's name is being typed.
     Name,
-    /// The next key press is captured as the selected action's binding.
     Key,
-    /// The selected set's name is being typed.
+    /// Capturing a gamepad button for a quick action.
+    GamepadButton,
     SetName,
-    /// The selected wheel's name is being typed.
     WheelName,
-    /// The selected wheel's slot label at this index is being typed.
     SlotName(usize),
-    /// The next key press is captured as the "next set" switch shortcut.
     NextSetKey,
-    /// The next key press is captured as the "previous set" switch shortcut.
     PrevSetKey,
+    /// Capturing the hold-key for the selected wheel.
+    WheelHoldKey,
+    /// Typing the name of the selected wheel-set entry.
+    WheelSetName,
+    /// Capturing the cycle-key for the selected wheel-set entry.
+    WheelSetSwitchKey,
+    SlotIcon(usize),
+    /// Capturing an input binding for a segment (keyboard or gamepad).
+    SlotInput(usize),
+    /// Editing the name of item `item` inside slot `slot`.
+    SlotItemName(usize, usize),
+    /// Editing the icon of item `item` inside slot `slot`.
+    SlotItemIcon(usize, usize),
 }
 
-/// Transient UI state. `dirty` triggers a sidebar + canvas rebuild.
 #[derive(Resource)]
 pub struct EditorUiState {
-    /// When `true`, the sidebar and canvas are rebuilt next frame.
     pub dirty: bool,
-    /// Current canvas focus.
     pub selection: Selection,
-    /// Which inline field (if any) is capturing keyboard input.
     pub editing: EditFocus,
-    /// Path used by Save / Load.
     pub config_path: String,
+    /// Index of the set currently shown in the HUD preview.
+    pub active_set: usize,
 }
-
 impl Default for EditorUiState {
     fn default() -> Self {
         Self {
@@ -355,110 +530,242 @@ impl Default for EditorUiState {
             selection: Selection::None,
             editing: EditFocus::None,
             config_path: "quickactions_config.ron".into(),
+            active_set: 0,
         }
     }
 }
 
-/// Marker for the root of the sidebar UI (despawned on rebuild).
 #[derive(Component)]
 pub struct EditorRoot;
-
-/// Marker for the root of the canvas / preview (despawned on rebuild).
 #[derive(Component)]
 pub struct EditorCanvasRoot;
+/// Marks `Mesh2d` entities spawned for the Pie-shape preview —
+/// despawned by `rebuild_editor` on every UI rebuild.
+#[derive(Component)]
+pub struct WheelMeshPreview;
+#[derive(Component)]
+pub struct SegmentHoverColor(pub Color);
 
-/// A clickable editor control.
 #[derive(Component, Clone)]
 pub struct EditorButton {
-    /// What pressing it does.
     pub action: EditorAction,
-    /// Idle background color, restored when not hovered.
     pub base: Color,
 }
 
-/// Every mutation the editor UI can request. Handled by [`handle_editor_buttons`].
 #[derive(Clone, Debug)]
 pub enum EditorAction {
-    /// Append a new, empty action set.
+    // ── sets ────────────────────────────────────────────────────────────────
     AddSet,
-    /// Append a quick action to a set.
-    AddAction { set: usize },
-    /// Append a standalone wheel to a set.
-    AddWheel { set: usize },
-    /// Append a wheel set (seeded with one wheel) to a set.
-    AddWheelSet { set: usize },
-    /// Append a wheel to the wheel set at `(set, entry)`.
-    AddWheelToSet { set: usize, entry: usize },
-    /// Select a quick action.
-    SelectAction { set: usize, entry: usize },
-    /// Select a wheel (`wheel` indexes into a wheel set, or `None` for a
-    /// standalone wheel).
-    SelectWheel { set: usize, entry: usize, wheel: Option<usize> },
-    /// Focus the selected action's name field for typing.
-    EditName { set: usize, entry: usize },
-    /// Capture the next key press as the action's binding.
-    CaptureKey { set: usize, entry: usize },
-    /// Cycle the action's icon glyph.
-    CycleIcon { set: usize, entry: usize },
-    /// Cycle the action's assigned command.
-    CycleCommand { set: usize, entry: usize },
-    /// Toggle hold-to-activate.
-    ToggleHold { set: usize, entry: usize },
-    /// Toggle show-on-menu.
-    ToggleShowOnMenu { set: usize, entry: usize },
-    /// Change the action opacity.
-    OpacityDelta { set: usize, entry: usize, delta: f32 },
-    /// Change the action radius.
-    RadiusDelta { set: usize, entry: usize, delta: f32 },
-    /// Cycle the placement reference.
-    CyclePosition { set: usize, entry: usize },
-    /// Cycle the button shape.
-    CycleShape { set: usize, entry: usize },
-    /// Select an action set's settings submenu.
-    SelectSet { set: usize },
-    /// Focus the selected set's name field for typing.
-    EditSetName { set: usize },
-    /// Change a set's opacity.
-    SetOpacityDelta { set: usize, delta: f32 },
-    /// Toggle a set's input-override flag.
-    ToggleInputOverride { set: usize },
-    /// Open the top-of-tree set-switching submenu.
+    DeleteSet {
+        set: usize,
+    },
+    SelectSet {
+        set: usize,
+    },
+    EditSetName {
+        set: usize,
+    },
+    SetOpacityDelta {
+        set: usize,
+        delta: f32,
+    },
+    ToggleInputOverride {
+        set: usize,
+    },
+    /// Switch the set shown in the HUD canvas.
+    SetActiveSet {
+        set: usize,
+    },
+    // ── entries ─────────────────────────────────────────────────────────────
+    AddAction {
+        set: usize,
+    },
+    AddWheel {
+        set: usize,
+    },
+    AddWheelSet {
+        set: usize,
+    },
+    AddWheelToSet {
+        set: usize,
+        entry: usize,
+    },
+    DeleteEntry {
+        set: usize,
+        entry: usize,
+    },
+    DeleteWheelFromSet {
+        set: usize,
+        entry: usize,
+        wheel: usize,
+    },
+    MoveEntryUp {
+        set: usize,
+        entry: usize,
+    },
+    MoveEntryDown {
+        set: usize,
+        entry: usize,
+    },
+    // ── selection ───────────────────────────────────────────────────────────
+    SelectAction {
+        set: usize,
+        entry: usize,
+    },
+    SelectWheel {
+        set: usize,
+        entry: usize,
+        wheel: Option<usize>,
+    },
+    SelectWheelSetEntry {
+        set: usize,
+        entry: usize,
+    },
     SelectSetSwitch,
-    /// Capture the next key press as the "next set" shortcut.
-    CaptureNextSetKey,
-    /// Capture the next key press as the "previous set" shortcut.
-    CapturePrevSetKey,
-    /// Focus the selected wheel's name field for typing.
+    /// Return to the navigation sidebar view.
+    NavBack,
+    // ── quick action editing ─────────────────────────────────────────────────
+    EditName {
+        set: usize,
+        entry: usize,
+    },
+    CaptureKey {
+        set: usize,
+        entry: usize,
+    },
+    CycleIcon {
+        set: usize,
+        entry: usize,
+    },
+    CycleCommand {
+        set: usize,
+        entry: usize,
+    },
+    ToggleHold {
+        set: usize,
+        entry: usize,
+    },
+    ToggleShowOnMenu {
+        set: usize,
+        entry: usize,
+    },
+    ToggleEnabled {
+        set: usize,
+        entry: usize,
+    },
+    OpacityDelta {
+        set: usize,
+        entry: usize,
+        delta: f32,
+    },
+    RadiusDelta {
+        set: usize,
+        entry: usize,
+        delta: f32,
+    },
+    ActionWidthDelta {
+        set: usize,
+        entry: usize,
+        delta: f32,
+    },
+    ActionHeightDelta {
+        set: usize,
+        entry: usize,
+        delta: f32,
+    },
+    CyclePosition {
+        set: usize,
+        entry: usize,
+    },
+    CycleShape {
+        set: usize,
+        entry: usize,
+    },
+    // ── wheel editing ────────────────────────────────────────────────────────
     EditWheelName,
-    /// Change the selected wheel's cooldown.
-    WheelCooldownDelta { delta: f32 },
-    /// Append a slot to the selected wheel.
+    CaptureWheelHoldKey,
+    CycleWheelTheme,
+    WheelCooldownDelta {
+        delta: f32,
+    },
+    WheelOuterRadiusDelta {
+        delta: f32,
+    },
+    WheelInnerRadiusDelta {
+        delta: f32,
+    },
+    WheelAnimSpeedDelta {
+        delta: f32,
+    },
+    ToggleWheelShowLabels,
+    ToggleWheelShowInfoInHub,
     AddSlot,
-    /// Remove the last slot from the selected wheel.
     RemoveSlot,
-    /// Focus the selected wheel's slot label at `slot` for typing.
-    EditSlotName { slot: usize },
-    /// Delete an action set.
-    DeleteSet { set: usize },
-    /// Delete an entry from a set.
-    DeleteEntry { set: usize, entry: usize },
-    /// Remove a wheel from a wheel-set entry.
-    DeleteWheelFromSet { set: usize, entry: usize, wheel: usize },
-    /// Move an entry one position earlier in its set.
-    MoveEntryUp { set: usize, entry: usize },
-    /// Move an entry one position later in its set.
-    MoveEntryDown { set: usize, entry: usize },
-    /// Save the document to disk.
+    EditSlotName {
+        slot: usize,
+    },
+    // ── wheel-set entry editing ──────────────────────────────────────────────
+    EditWheelSetName {
+        set: usize,
+        entry: usize,
+    },
+    CaptureWheelSetSwitchKey {
+        set: usize,
+        entry: usize,
+    },
+    // ── set-switch shortcuts ─────────────────────────────────────────────────
+    CaptureNextSetKey,
+    CapturePrevSetKey,
+    // ── persistence ──────────────────────────────────────────────────────────
     Save,
-    /// Load the document from disk.
     Load,
+    // ── segment editing ──────────────────────────────────────────────────────
+    SelectSegment {
+        set: usize,
+        entry: usize,
+        wheel: Option<usize>,
+        slot: usize,
+    },
+    EditSlotIcon {
+        slot: usize,
+    },
+    CycleSegmentShape,
+    ToggleWheelShowIcon,
+    CycleHighlightColor,
+    SegmentScaleDelta {
+        delta: f32,
+    },
+    // ── segment input / gamepad binding ─────────────────────────────────────────
+    /// Capture a key or gamepad button as the input binding for segment `slot`.
+    CaptureSlotInput {
+        slot: usize,
+    },
+    /// Capture a gamepad button for a quick action.
+    CaptureGamepadButton {
+        set: usize,
+        entry: usize,
+    },
+    // ── per-slot items ───────────────────────────────────────────────────────────
+    AddSlotItem {
+        slot: usize,
+    },
+    RemoveSlotItem {
+        slot: usize,
+        item: usize,
+    },
+    EditSlotItemName {
+        slot: usize,
+        item: usize,
+    },
+    EditSlotItemIcon {
+        slot: usize,
+        item: usize,
+    },
 }
 
 // ─── plugin ──────────────────────────────────────────────────────────────────────
 
-/// Plugin that adds the in-app Quick Action Menu editor.
 pub struct QuickActionEditorPlugin;
-
 impl Plugin for QuickActionEditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<QuickActionConfig>()
@@ -468,6 +775,7 @@ impl Plugin for QuickActionEditorPlugin {
                 (
                     handle_editor_buttons,
                     editor_capture_key,
+                    editor_capture_gamepad,
                     editor_text_input,
                     editor_button_feedback,
                     rebuild_editor,
@@ -477,33 +785,28 @@ impl Plugin for QuickActionEditorPlugin {
     }
 }
 
-// ─── palette ────────────────────────────────────────────────────────────────────
+// ─── palette ─────────────────────────────────────────────────────────────────────
 
 const BG_SIDEBAR: Color = Color::srgb(0.043, 0.055, 0.075);
 const BG_MAIN: Color = Color::srgb(0.055, 0.067, 0.086);
-const BG_SETSBAR: Color = Color::srgb(0.063, 0.078, 0.10);
 const SIDEBAR_BORDER: Color = Color::srgb(0.10, 0.12, 0.15);
-
 const GREEN: Color = Color::srgb(0.30, 0.74, 0.40);
 const GREEN_BG: Color = Color::srgba(0.30, 0.74, 0.40, 0.14);
-
 const TEXT: Color = Color::srgb(0.74, 0.79, 0.85);
 const DIM: Color = Color::srgb(0.42, 0.47, 0.54);
 const DIMMER: Color = Color::srgb(0.30, 0.34, 0.40);
 const ICON: Color = Color::srgb(0.45, 0.53, 0.61);
-
 const AMBER: Color = Color::srgb(0.82, 0.66, 0.25);
 const BLUE: Color = Color::srgb(0.38, 0.62, 0.95);
 const TEAL: Color = Color::srgb(0.52, 0.69, 0.75);
 const BADGE_BORDER: Color = Color::srgb(0.26, 0.30, 0.36);
-
 const ROW_SEL: Color = Color::srgba(0.38, 0.62, 0.95, 0.16);
 const ROW_HOVER: Color = Color::srgba(1.0, 1.0, 1.0, 0.05);
 const PANEL_CARD: Color = Color::srgb(0.08, 0.10, 0.15);
+const CTRL_BG: Color = Color::srgb(0.11, 0.14, 0.19);
 
-// ─── bsn! visual builders ────────────────────────────────────────────────────────
+// ─── primitive bsn! helpers ──────────────────────────────────────────────────────
 
-/// A single line of styled text.
 fn text(s: &str, size: f32, color: Color) -> impl Scene {
     bsn! {
         Text({s.to_string()})
@@ -512,7 +815,6 @@ fn text(s: &str, size: f32, color: Color) -> impl Scene {
     }
 }
 
-/// A horizontal cluster that vertically centers its children.
 fn hcluster() -> impl Scene {
     bsn! {
         Node {
@@ -523,12 +825,10 @@ fn hcluster() -> impl Scene {
     }
 }
 
-/// A clickable tree-row container with `space-between` layout.
 fn row_button(bg: Color) -> impl Scene {
     bsn! {
         Node {
-            width: {percent(100.)},
-            height: {px(24.)},
+            width: {percent(100.)}, height: {px(24.)},
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
             justify_content: JustifyContent::SpaceBetween,
@@ -540,12 +840,10 @@ fn row_button(bg: Color) -> impl Scene {
     }
 }
 
-/// The bordered box of a key-binding badge (its text is added as a child).
 fn key_badge_box() -> impl Scene {
     bsn! {
         Node {
-            width: {px(18.)},
-            height: {px(16.)},
+            width: {px(18.)}, height: {px(16.)},
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             border: {UiRect::all(px(1.))},
@@ -555,12 +853,10 @@ fn key_badge_box() -> impl Scene {
     }
 }
 
-/// A full-width "add" affordance (solid accent border stands in for dashed).
 fn add_button(icon: &str, icon_color: Color, label: &str, accent: Color) -> impl Scene {
     bsn! {
         Node {
-            width: {percent(100.)},
-            height: {px(26.)},
+            width: {percent(100.)}, height: {px(26.)},
             margin: {UiRect::top(px(4.))},
             flex_direction: FlexDirection::Row,
             justify_content: JustifyContent::Center,
@@ -580,13 +876,11 @@ fn add_button(icon: &str, icon_color: Color, label: &str, accent: Color) -> impl
     }
 }
 
-/// A clickable `▾ Set N … ⚙` group header row.
 fn set_header_row(bg: Color) -> impl Scene {
     bsn! {
         Node {
-            width: {percent(100.)},
-            height: {px(24.)},
-            margin: {UiRect::top(px(6.))},
+            width: {percent(100.)}, height: {px(26.)},
+            margin: {UiRect::top(px(4.))},
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
             justify_content: JustifyContent::SpaceBetween,
@@ -598,14 +892,11 @@ fn set_header_row(bg: Color) -> impl Scene {
     }
 }
 
-/// A column that holds a group's children.
+#[allow(dead_code)]
 fn col() -> impl Scene {
-    bsn! {
-        Node { flex_direction: FlexDirection::Column, row_gap: {px(1.)} }
-    }
+    bsn! { Node { flex_direction: FlexDirection::Column, row_gap: {px(1.)} } }
 }
 
-/// A column indented under a group header.
 fn indent_col() -> impl Scene {
     bsn! {
         Node {
@@ -616,11 +907,10 @@ fn indent_col() -> impl Scene {
     }
 }
 
-/// The fixed-width sidebar shell.
 fn sidebar() -> impl Scene {
     bsn! {
         Node {
-            width: {px(258.)},
+            width: {px(260.)},
             height: {percent(100.)},
             flex_direction: FlexDirection::Column,
             border: {UiRect::right(px(1.))},
@@ -630,57 +920,6 @@ fn sidebar() -> impl Scene {
     }
 }
 
-/// The title block.
-fn header() -> impl Scene {
-    bsn! {
-        Node {
-            flex_direction: FlexDirection::Row,
-            justify_content: JustifyContent::SpaceBetween,
-            align_items: AlignItems::FlexStart,
-            padding: {UiRect::all(px(16.))},
-        }
-        Children [
-            (
-                Node { flex_direction: FlexDirection::Column, row_gap: {px(2.)} }
-                Children [
-                    text("QUICK ACTION", 13., GREEN),
-                    text("MENU EDITOR", 10., DIM),
-                ]
-            ),
-            text("⚙", 12., DIM),
-        ]
-    }
-}
-
-/// The `SETS … + Set` bar (its `+ Set` button is made clickable imperatively).
-fn sets_bar() -> impl Scene {
-    bsn! {
-        Node {
-            flex_direction: FlexDirection::Row,
-            justify_content: JustifyContent::SpaceBetween,
-            align_items: AlignItems::Center,
-            padding: {UiRect::axes(px(16.), px(8.))},
-        }
-        BackgroundColor({BG_SETSBAR})
-    }
-}
-
-/// The `+ Set` pill button.
-fn set_pill() -> impl Scene {
-    bsn! {
-        Node {
-            padding: {UiRect::axes(px(8.), px(3.))},
-            border: {UiRect::all(px(1.))},
-            border_radius: {BorderRadius::all(px(4.))},
-        }
-        BorderColor::all(GREEN)
-        BackgroundColor({GREEN_BG})
-        Button
-        Children [ text("+ Set", 10., GREEN) ]
-    }
-}
-
-/// The scrollable tree column.
 fn tree() -> impl Scene {
     bsn! {
         Node {
@@ -693,7 +932,17 @@ fn tree() -> impl Scene {
     }
 }
 
-/// A footer action button (`SAVE` / `LOAD`).
+fn del_btn() -> impl Scene {
+    bsn! {
+        Node {
+            width: {px(16.)}, height: {px(16.)},
+            justify_content: JustifyContent::Center,
+            align_items: AlignItems::Center,
+        }
+        Button
+    }
+}
+
 fn footer_button(label: &str, accent: Color, filled: bool) -> impl Scene {
     let (bg, border) = if filled {
         (GREEN_BG, Color::NONE)
@@ -702,12 +951,11 @@ fn footer_button(label: &str, accent: Color, filled: bool) -> impl Scene {
     };
     bsn! {
         Node {
-            flex_grow: 1.,
-            height: {px(30.)},
+            padding: {UiRect::axes(px(16.), px(6.))},
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             border: {UiRect::all(px(1.))},
-            border_radius: {BorderRadius::all(px(4.))},
+            border_radius: {BorderRadius::all(px(5.))},
         }
         BorderColor::all(border)
         BackgroundColor({bg})
@@ -716,16 +964,14 @@ fn footer_button(label: &str, accent: Color, filled: bool) -> impl Scene {
     }
 }
 
-// ─── imperative spawn helpers ────────────────────────────────────────────────────
+// ─── entity helpers ──────────────────────────────────────────────────────────────
 
-/// Spawn `scene` as a child of `parent`, returning the new entity.
 fn child(commands: &mut Commands, parent: Entity, scene: impl Scene) -> Entity {
     let e = commands.spawn_scene(scene).id();
     commands.entity(parent).add_child(e);
     e
 }
 
-/// Spawn a clickable `scene` (carrying an [`EditorButton`]) under `parent`.
 fn clickable(
     commands: &mut Commands,
     parent: Entity,
@@ -741,65 +987,45 @@ fn clickable(
     e
 }
 
-/// A small × delete button.
-fn del_btn() -> impl Scene {
-    bsn! {
-        Node {
-            width: {px(15.)},
-            height: {px(15.)},
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            border_radius: {BorderRadius::all(px(3.))},
-            margin: {UiRect::left(px(2.))},
-        }
-        Button
-    }
-}
-
-/// What trails a tree row on the right.
+#[derive(Clone)]
+#[allow(dead_code)]
 enum Badge {
-    /// No trailing badge.
     None,
-    /// A bordered key-binding badge.
     Key(String),
-    /// Dim text (cooldown / count).
     Dim(String),
 }
 
-/// Spawn a clickable entry row with an icon, label, optional trailing badge and optional delete button.
-#[allow(clippy::too_many_arguments)]
 fn spawn_entry_row(
     commands: &mut Commands,
     parent: Entity,
     selected: bool,
-    action: EditorAction,
+    select_action: EditorAction,
     icon: &str,
-    icon_color: Color,
-    label: &str,
-    label_color: Color,
+    icon_col: Color,
+    name: &str,
+    name_col: Color,
     badge: Badge,
-    delete: Option<EditorAction>,
+    del: Option<EditorAction>,
 ) {
-    let base = if selected { ROW_SEL } else { Color::NONE };
-    let row = clickable(commands, parent, row_button(base), action, base);
-    let cluster = child(commands, row, hcluster());
-    child(commands, cluster, text(icon, 10., icon_color));
-    child(commands, cluster, text(label, 11., label_color));
-    // Right cluster: badge + optional delete button grouped together.
+    let bg = if selected { ROW_SEL } else { Color::NONE };
+    let row = clickable(commands, parent, row_button(bg), select_action, bg);
+    let left = child(commands, row, hcluster());
+    child(commands, left, text(icon, 10., icon_col));
+    child(commands, left, text(name, 11., name_col));
     let right = child(commands, row, hcluster());
-    match badge {
-        Badge::None => {}
+    match &badge {
         Badge::Key(k) => {
-            let box_e = child(commands, right, key_badge_box());
-            child(commands, box_e, text(&k, 9., DIM));
+            let kb = child(commands, right, key_badge_box());
+            child(commands, kb, text(k, 8., DIM));
         }
         Badge::Dim(s) => {
-            child(commands, right, text(&s, 9., DIM));
+            child(commands, right, text(s, 9., DIMMER));
         }
+        Badge::None => {}
     }
-    if let Some(del) = delete {
-        let d = clickable(commands, right, del_btn(), del, Color::NONE);
-        child(commands, d, text("×", 10., DIMMER));
+    if let Some(da) = del {
+        let dx = clickable(commands, right, del_btn(), da, Color::NONE);
+        child(commands, dx, text("×", 10., DIMMER));
     }
 }
 
@@ -812,6 +1038,9 @@ fn rebuild_editor(
     windows: Query<&Window>,
     old_sidebar: Query<Entity, With<EditorRoot>>,
     old_canvas: Query<Entity, With<EditorCanvasRoot>>,
+    old_meshes: Query<Entity, With<WheelMeshPreview>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     if !ui.dirty {
         return;
@@ -824,175 +1053,634 @@ fn rebuild_editor(
     for e in &old_canvas {
         commands.entity(e).despawn();
     }
+    for e in &old_meshes {
+        commands.entity(e).despawn();
+    }
+
+    if !cfg.sets.is_empty() {
+        ui.active_set = ui.active_set.min(cfg.sets.len() - 1);
+    }
 
     build_sidebar(&mut commands, &cfg, &ui);
-
-    let win_w = windows.iter().next().map(|w| w.width()).unwrap_or(1229.0);
-    build_canvas(&mut commands, &cfg, &ui, win_w);
+    let win = windows.iter().next();
+    let win_w = win.map(|w| w.width()).unwrap_or(1229.0);
+    let win_h = win.map(|w| w.height()).unwrap_or(768.0);
+    build_hud_canvas(
+        &mut commands,
+        &cfg,
+        &ui,
+        win_w,
+        win_h,
+        &mut meshes,
+        &mut materials,
+    );
 }
 
-/// Builds the whole sidebar tree from the document.
+// ─── sidebar ─────────────────────────────────────────────────────────────────────
+
 fn build_sidebar(commands: &mut Commands, cfg: &QuickActionConfig, ui: &EditorUiState) {
     let root = commands.spawn_scene(sidebar()).insert(EditorRoot).id();
 
-    child(commands, root, header());
+    match ui.selection {
+        // Navigation view ─────────────────────────────────────────────────────
+        Selection::None | Selection::Set { .. } => {
+            build_nav_sidebar(commands, root, cfg, ui);
+        }
 
-    // SETS bar with its + Set pill.
-    let bar = child(commands, root, sets_bar());
-    let left = child(commands, bar, hcluster());
-    child(commands, left, text("≣", 11., DIM));
-    child(commands, left, text("SETS", 11., DIM));
-    clickable(commands, bar, set_pill(), EditorAction::AddSet, GREEN_BG);
+        // Button / quick-action editor ────────────────────────────────────────
+        Selection::Action { set, entry } => {
+            let qa = cfg
+                .sets
+                .get(set)
+                .and_then(|s| s.entries.get(entry))
+                .and_then(|e| {
+                    if let SetEntry::Action(a) = e {
+                        Some(a)
+                    } else {
+                        None
+                    }
+                });
+            if let Some(qa) = qa {
+                build_editor_header(
+                    commands,
+                    root,
+                    Option::<&str>::None,
+                    &qa.name.clone(),
+                    EditorAction::NavBack,
+                );
+                let scroll = child(commands, root, tree());
+                spawn_action_editor(commands, scroll, ui, set, entry, qa);
+                build_footer(commands, root, &ui.config_path);
+            } else {
+                build_nav_sidebar(commands, root, cfg, ui);
+            }
+        }
 
-    // Scrollable tree.
-    let tree = child(commands, root, tree());
-    build_set_switch(commands, tree, ui, cfg);
-    for (si, set) in cfg.sets.iter().enumerate() {
-        build_set(commands, tree, ui, si, set);
+        // Wheel editor ────────────────────────────────────────────────────────
+        Selection::Wheel { set, entry, wheel } => {
+            let w_ref = cfg
+                .sets
+                .get(set)
+                .and_then(|s| s.entries.get(entry))
+                .and_then(|e| match (e, wheel) {
+                    (SetEntry::Wheel(w), None) => Some(w as &Wheel),
+                    (SetEntry::WheelSet(ws), Some(i)) => ws.wheels.get(i).map(|w| w as &Wheel),
+                    _ => None,
+                });
+            if let Some(w) = w_ref {
+                let parent_name: Option<String> = wheel.map(|_| {
+                    cfg.sets
+                        .get(set)
+                        .and_then(|s| s.entries.get(entry))
+                        .and_then(|e| {
+                            if let SetEntry::WheelSet(ws) = e {
+                                Some(ws.name.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or("Wheel Set")
+                        .to_string()
+                });
+                let wname = w.name.clone();
+                build_editor_header(
+                    commands,
+                    root,
+                    parent_name.as_deref(),
+                    &wname,
+                    EditorAction::NavBack,
+                );
+                let scroll = child(commands, root, tree());
+                spawn_wheel_editor(commands, scroll, ui, w, set, entry, wheel);
+                build_footer(commands, root, &ui.config_path);
+            } else {
+                build_nav_sidebar(commands, root, cfg, ui);
+            }
+        }
+
+        // Wheel-set entry editor ──────────────────────────────────────────────
+        Selection::WheelSetEntry { set, entry } => {
+            let ws = cfg
+                .sets
+                .get(set)
+                .and_then(|s| s.entries.get(entry))
+                .and_then(|e| {
+                    if let SetEntry::WheelSet(ws) = e {
+                        Some(ws)
+                    } else {
+                        None
+                    }
+                });
+            if let Some(ws) = ws {
+                let wname = ws.name.clone();
+                build_editor_header(
+                    commands,
+                    root,
+                    Option::<&str>::None,
+                    &wname,
+                    EditorAction::NavBack,
+                );
+                let scroll = child(commands, root, tree());
+                spawn_wheelset_entry_editor(commands, scroll, ui, set, entry, ws);
+                build_footer(commands, root, &ui.config_path);
+            } else {
+                build_nav_sidebar(commands, root, cfg, ui);
+            }
+        }
+
+        // Set-switch editor ───────────────────────────────────────────────────
+        Selection::SetSwitch => {
+            build_editor_header(
+                commands,
+                root,
+                Option::<&str>::None,
+                "Set Switching",
+                EditorAction::NavBack,
+            );
+            let scroll = child(commands, root, tree());
+            let card = child(commands, scroll, editor_card());
+            let nf = ui.editing == EditFocus::NextSetKey;
+            let (nd, nc) = key_display(nf, &cfg.next_set_key);
+            spawn_box_field(
+                commands,
+                card,
+                "Next set",
+                &nd,
+                nc,
+                if nf { AMBER } else { BADGE_BORDER },
+                EditorAction::CaptureNextSetKey,
+            );
+            let pf = ui.editing == EditFocus::PrevSetKey;
+            let (pd, pc) = key_display(pf, &cfg.prev_set_key);
+            spawn_box_field(
+                commands,
+                card,
+                "Prev set",
+                &pd,
+                pc,
+                if pf { AMBER } else { BADGE_BORDER },
+                EditorAction::CapturePrevSetKey,
+            );
+            build_footer(commands, root, &ui.config_path);
+        }
+
+        // Segment editor ──────────────────────────────────────────────────────
+        Selection::Segment {
+            set,
+            entry,
+            wheel,
+            slot,
+        } => {
+            let w_ref = cfg
+                .sets
+                .get(set)
+                .and_then(|s| s.entries.get(entry))
+                .and_then(|e| match (e, wheel) {
+                    (SetEntry::Wheel(w), None) => Some(w as &Wheel),
+                    (SetEntry::WheelSet(ws), Some(i)) => ws.wheels.get(i).map(|w| w as &Wheel),
+                    _ => None,
+                });
+            if let Some(w) = w_ref {
+                let slot_name = w
+                    .slots
+                    .get(slot)
+                    .map(|s| s.name.clone())
+                    .unwrap_or_default();
+                let wname = w.name.clone();
+                build_editor_header(
+                    commands,
+                    root,
+                    Some(wname.as_str()),
+                    &slot_name,
+                    EditorAction::NavBack,
+                );
+                let scroll = child(commands, root, tree());
+                spawn_segment_editor(commands, scroll, ui, slot, w);
+                build_footer(commands, root, &ui.config_path);
+            } else {
+                build_nav_sidebar(commands, root, cfg, ui);
+            }
+        }
+    }
+}
+
+/// Breadcrumb header for editor panels.  `‹ [parent |] name`
+fn build_editor_header(
+    commands: &mut Commands,
+    parent: Entity,
+    parent_name: Option<&str>,
+    item_name: &str,
+    back_action: EditorAction,
+) {
+    let header = commands
+        .spawn_scene(bsn! {
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                padding: {UiRect::all(px(12.))},
+                column_gap: {px(6.)},
+                border: {UiRect::bottom(px(1.))},
+            }
+            BorderColor::all(SIDEBAR_BORDER)
+        })
+        .id();
+    commands.entity(parent).add_child(header);
+
+    let back = clickable(
+        commands,
+        header,
+        bsn! {
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: {px(3.)},
+                padding: {UiRect::axes(px(5.), px(3.))},
+                border_radius: {BorderRadius::all(px(4.))},
+            }
+            Button
+        },
+        back_action,
+        Color::NONE,
+    );
+    child(commands, back, text("‹", 15., DIM));
+
+    if let Some(pn) = parent_name {
+        child(commands, header, text(pn, 11., DIM));
+        child(commands, header, text("|", 11., DIMMER));
+    }
+    child(commands, header, text(item_name, 11., TEXT));
+}
+
+/// Navigation sidebar: wheel-set tree + button list for the active set.
+fn build_nav_sidebar(
+    commands: &mut Commands,
+    root: Entity,
+    cfg: &QuickActionConfig,
+    ui: &EditorUiState,
+) {
+    // Header: set name as title.
+    let set_name = cfg
+        .sets
+        .get(ui.active_set)
+        .map(|s| s.name.as_str())
+        .unwrap_or("—");
+    let header = commands
+        .spawn_scene(bsn! {
+            Node {
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Center,
+                padding: {UiRect::all(px(14.))},
+                border: {UiRect::bottom(px(1.))},
+            }
+            BorderColor::all(SIDEBAR_BORDER)
+        })
+        .id();
+    commands.entity(root).add_child(header);
+    child(commands, header, text(set_name, 13., TEXT));
+    clickable(
+        commands,
+        header,
+        bsn! {
+            Node { padding: {UiRect::all(px(2.))} }
+            Button
+            Children [ text("⚙", 11., DIM) ]
+        },
+        EditorAction::SelectSet { set: ui.active_set },
+        Color::NONE,
+    );
+
+    // Scrollable body.
+    let scroll = child(commands, root, tree());
+
+    if let Some(set) = cfg.sets.get(ui.active_set) {
+        build_nav_wheel_section(commands, scroll, ui, set, ui.active_set);
+        build_nav_button_section(commands, scroll, ui, set, ui.active_set);
+    } else {
+        child(
+            commands,
+            scroll,
+            text("No sets yet — use Save/Load or add one.", 10., DIMMER),
+        );
     }
 
-    // Footer.
+    build_set_switch_summary(commands, root, cfg);
     build_footer(commands, root, &ui.config_path);
 }
 
-/// Builds one action-set group.
-fn build_set(
+/// "~ WHEEL SET" navigation section.
+fn build_nav_wheel_section(
     commands: &mut Commands,
     parent: Entity,
     ui: &EditorUiState,
-    si: usize,
     set: &ActionSet,
+    si: usize,
 ) {
-    let group = child(commands, parent, col());
-
-    // Clickable header that opens the set's settings submenu.
-    let set_selected = ui.selection == Selection::Set { set: si };
-    let hb = if set_selected { ROW_SEL } else { Color::NONE };
-    let header = clickable(
-        commands, group, set_header_row(hb),
-        EditorAction::SelectSet { set: si }, hb,
+    // Section header.
+    let sec = child(
+        commands,
+        parent,
+        bsn! {
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::SpaceBetween,
+                padding: {UiRect::new(px(2.), px(0.), px(8.), px(2.))},
+            }
+        },
     );
-    let hc = child(commands, header, hcluster());
-    child(commands, hc, text("▾", 9., DIM));
-    child(commands, hc, text(&set.name, 11., TEXT));
-    let right = child(commands, header, hcluster());
-    if set.opacity < 0.999 {
-        child(commands, right, text(&format!("{:.0}%", set.opacity * 100.0), 9., DIM));
-    }
-    if set.input_override {
-        child(commands, right, text("⊘", 9., AMBER));
-    }
-    // ⚙ gear opens settings; × deletes the set.
-    child(commands, right, text("⚙", 10., DIM));
-    let dx = clickable(commands, right, del_btn(), EditorAction::DeleteSet { set: si }, Color::NONE);
-    child(commands, dx, text("×", 10., DIMMER));
+    let hl = child(commands, sec, hcluster());
+    child(commands, hl, text("~", 9., TEAL));
+    child(commands, hl, text("WHEEL SET", 10., DIM));
+    clickable(
+        commands,
+        sec,
+        bsn! {
+            Node {
+                padding: {UiRect::axes(px(6.), px(2.))},
+                border: {UiRect::all(px(1.))},
+                border_radius: {BorderRadius::all(px(3.))},
+            }
+            BorderColor::all(BLUE)
+            Button
+            Children [ text("+", 10., BLUE) ]
+        },
+        EditorAction::AddWheelSet { set: si },
+        Color::NONE,
+    );
 
-    let body = child(commands, group, indent_col());
+    let body = child(commands, parent, indent_col());
+    let mut has_any = false;
 
-    if set_selected {
-        spawn_set_editor(commands, body, ui, si, set);
-    }
-
-    let n_entries = set.entries.len();
     for (ei, entry) in set.entries.iter().enumerate() {
         match entry {
-            SetEntry::Action(qa) => {
-                let selected = ui.selection == (Selection::Action { set: si, entry: ei });
-                let badge = if qa.key.is_empty() {
+            SetEntry::Wheel(w) => {
+                has_any = true;
+                let sel = ui.selection
+                    == (Selection::Wheel {
+                        set: si,
+                        entry: ei,
+                        wheel: None,
+                    });
+                let badge = if w.hold_key.is_empty() {
                     Badge::None
                 } else {
-                    Badge::Key(qa.key.clone())
+                    Badge::Key(w.hold_key.clone())
                 };
                 spawn_entry_row(
-                    commands, body, selected,
-                    EditorAction::SelectAction { set: si, entry: ei },
-                    &qa.icon, ICON, &qa.name, TEXT, badge,
+                    commands,
+                    body,
+                    sel,
+                    EditorAction::SelectWheel {
+                        set: si,
+                        entry: ei,
+                        wheel: None,
+                    },
+                    "○",
+                    ICON,
+                    &w.name,
+                    TEXT,
+                    badge,
                     Some(EditorAction::DeleteEntry { set: si, entry: ei }),
                 );
-                if selected {
-                    spawn_action_editor(commands, body, ui, si, ei, qa);
-                }
-            }
-            SetEntry::Wheel(w) => {
-                let selected =
-                    ui.selection == (Selection::Wheel { set: si, entry: ei, wheel: None });
-                spawn_entry_row(
-                    commands, body, selected,
-                    EditorAction::SelectWheel { set: si, entry: ei, wheel: None },
-                    "○", ICON, &w.name, TEXT,
-                    Badge::Dim(format!("{:.0}s", w.cooldown_secs)),
-                    Some(EditorAction::DeleteEntry { set: si, entry: ei }),
-                );
-                if selected {
-                    spawn_wheel_editor(commands, body, ui, w);
-                }
             }
             SetEntry::WheelSet(ws) => {
-                build_wheel_set(commands, body, ui, si, ei, ws);
+                has_any = true;
+                let ws_sel = ui.selection == (Selection::WheelSetEntry { set: si, entry: ei });
+                let ws_bg = if ws_sel { ROW_SEL } else { Color::NONE };
+                let wsh = clickable(
+                    commands,
+                    body,
+                    set_header_row(ws_bg),
+                    EditorAction::SelectWheelSetEntry { set: si, entry: ei },
+                    ws_bg,
+                );
+                let whl = child(commands, wsh, hcluster());
+                child(commands, whl, text("⊞", 10., BLUE));
+                child(commands, whl, text(&ws.name, 11., TEXT));
+                let whr = child(commands, wsh, hcluster());
+                child(
+                    commands,
+                    whr,
+                    text(&format!("{}w", ws.wheels.len()), 9., DIM),
+                );
+                let dx = clickable(
+                    commands,
+                    whr,
+                    del_btn(),
+                    EditorAction::DeleteEntry { set: si, entry: ei },
+                    Color::NONE,
+                );
+                child(commands, dx, text("×", 10., DIMMER));
+
+                let wsb = child(commands, body, indent_col());
+                for (wi, w) in ws.wheels.iter().enumerate() {
+                    let wsel = ui.selection
+                        == (Selection::Wheel {
+                            set: si,
+                            entry: ei,
+                            wheel: Some(wi),
+                        });
+                    let badge = if w.hold_key.is_empty() {
+                        Badge::None
+                    } else {
+                        Badge::Key(w.hold_key.clone())
+                    };
+                    spawn_entry_row(
+                        commands,
+                        wsb,
+                        wsel,
+                        EditorAction::SelectWheel {
+                            set: si,
+                            entry: ei,
+                            wheel: Some(wi),
+                        },
+                        "○",
+                        ICON,
+                        &w.name,
+                        TEAL,
+                        badge,
+                        Some(EditorAction::DeleteWheelFromSet {
+                            set: si,
+                            entry: ei,
+                            wheel: wi,
+                        }),
+                    );
+                }
+                let link = clickable(
+                    commands,
+                    wsb,
+                    row_button(Color::NONE),
+                    EditorAction::AddWheelToSet { set: si, entry: ei },
+                    Color::NONE,
+                );
+                child(commands, link, text("+ add wheel", 10., DIM));
             }
+            _ => {}
         }
-        // ↑↓ reorder buttons (shown between add-buttons and entries, not on first/last).
-        let _ = n_entries; // suppress unused warning
+    }
+    if !has_any {
+        child(commands, body, text("No wheels yet.", 10., DIMMER));
     }
 
-    // Per-set "add" affordances.
+    // Add standalone wheel.
     clickable(
-        commands, body, add_button("◆", AMBER, "Quick Action", AMBER),
-        EditorAction::AddAction { set: si }, Color::srgba(1., 1., 1., 0.015),
-    );
-    clickable(
-        commands, body, add_button("○", BLUE, "Wheel", BLUE),
-        EditorAction::AddWheel { set: si }, Color::srgba(1., 1., 1., 0.015),
-    );
-    clickable(
-        commands, body, add_button("◈", BLUE, "Wheel Set", BLUE),
-        EditorAction::AddWheelSet { set: si }, Color::srgba(1., 1., 1., 0.015),
+        commands,
+        body,
+        add_button("○", BLUE, "Add Wheel", BLUE),
+        EditorAction::AddWheel { set: si },
+        Color::srgba(1., 1., 1., 0.015),
     );
 }
 
-/// Builds a nested wheel-set group (header + wheel rows + add link).
-fn build_wheel_set(
+/// "~ BUTTONS" navigation section.
+fn build_nav_button_section(
     commands: &mut Commands,
     parent: Entity,
     ui: &EditorUiState,
+    set: &ActionSet,
     si: usize,
-    ei: usize,
-    ws: &WheelSet,
 ) {
-    let group = child(commands, parent, col());
+    // Section header.
+    let sec = child(
+        commands,
+        parent,
+        bsn! {
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::SpaceBetween,
+                padding: {UiRect::new(px(2.), px(0.), px(8.), px(10.))},
+            }
+        },
+    );
+    let hl = child(commands, sec, hcluster());
+    child(commands, hl, text("~", 9., AMBER));
+    child(commands, hl, text("BUTTONS", 10., DIM));
+    clickable(
+        commands,
+        sec,
+        bsn! {
+            Node {
+                padding: {UiRect::axes(px(6.), px(2.))},
+                border: {UiRect::all(px(1.))},
+                border_radius: {BorderRadius::all(px(3.))},
+            }
+            BorderColor::all(AMBER)
+            Button
+            Children [ text("+", 10., AMBER) ]
+        },
+        EditorAction::AddAction { set: si },
+        Color::NONE,
+    );
 
-    // Header row: `▾ ◈ Name … Nw`.
-    let header = child(commands, group, row_button(Color::NONE));
-    let cluster = child(commands, header, hcluster());
-    child(commands, cluster, text("▾", 9., DIM));
-    child(commands, cluster, text("◈", 10., BLUE));
-    child(commands, cluster, text(&ws.name, 11., TEXT));
-    child(commands, header, text(&format!("{}w", ws.wheels.len()), 9., DIM));
+    let body = child(commands, parent, indent_col());
+    let mut has_any = false;
 
-    let body = child(commands, group, indent_col());
-    for (wi, w) in ws.wheels.iter().enumerate() {
-        let selected =
-            ui.selection == (Selection::Wheel { set: si, entry: ei, wheel: Some(wi) });
-        spawn_entry_row(
-            commands, body, selected,
-            EditorAction::SelectWheel { set: si, entry: ei, wheel: Some(wi) },
-            "○", ICON, &w.name, TEAL,
-            Badge::Dim(format!("{:.0}s", w.cooldown_secs)),
-            Some(EditorAction::DeleteWheelFromSet { set: si, entry: ei, wheel: wi }),
-        );
-        if selected {
-            spawn_wheel_editor(commands, body, ui, w);
+    for (ei, entry) in set.entries.iter().enumerate() {
+        if let SetEntry::Action(qa) = entry {
+            has_any = true;
+            let sel = ui.selection == (Selection::Action { set: si, entry: ei });
+            let badge = if qa.key.is_empty() {
+                Badge::None
+            } else {
+                Badge::Key(qa.key.clone())
+            };
+            spawn_entry_row(
+                commands,
+                body,
+                sel,
+                EditorAction::SelectAction { set: si, entry: ei },
+                "□",
+                ICON,
+                &qa.name,
+                TEXT,
+                badge,
+                Some(EditorAction::DeleteEntry { set: si, entry: ei }),
+            );
         }
     }
-    // `+ add wheel` link.
-    let link = clickable(
-        commands, body, row_button(Color::NONE),
-        EditorAction::AddWheelToSet { set: si, entry: ei }, Color::NONE,
-    );
-    child(commands, link, text("+ add wheel", 10., DIM));
+    if !has_any {
+        child(commands, body, text("No buttons yet.", 10., DIMMER));
+    }
 }
 
-/// Builds the pinned save/load footer.
+/// Compact "SET SWITCH KEYS" bar above the footer.
+fn build_set_switch_summary(commands: &mut Commands, parent: Entity, cfg: &QuickActionConfig) {
+    let area = commands
+        .spawn_scene(bsn! {
+            Node {
+                flex_direction: FlexDirection::Column,
+                padding: {UiRect::axes(px(12.), px(8.))},
+                row_gap: {px(6.)},
+                border: {UiRect::top(px(1.))},
+            }
+            BorderColor::all(SIDEBAR_BORDER)
+        })
+        .id();
+    commands.entity(parent).add_child(area);
+
+    let title_row = child(commands, area, hcluster());
+    child(commands, title_row, text("~", 9., TEAL));
+    child(commands, title_row, text("SET SWITCH KEYS", 9., DIM));
+
+    let keys_row = child(
+        commands,
+        area,
+        bsn! {
+            Node {
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::SpaceBetween,
+            }
+        },
+    );
+
+    let prev = clickable(
+        commands,
+        keys_row,
+        bsn! {
+            Node {
+                flex_direction: FlexDirection::Row, align_items: AlignItems::Center,
+                column_gap: {px(4.)},
+                padding: {UiRect::axes(px(6.), px(3.))},
+                border: {UiRect::all(px(1.))},
+                border_radius: {BorderRadius::all(px(4.))},
+            }
+            BorderColor::all(BADGE_BORDER)
+            Button
+        },
+        EditorAction::SelectSetSwitch,
+        Color::NONE,
+    );
+    child(commands, prev, text("‹", 11., DIM));
+    child(commands, prev, text("PREV SET", 9., DIM));
+    let pk = child(commands, prev, key_badge_box());
+    child(commands, pk, text(&label_or(&cfg.prev_set_key), 8., TEAL));
+
+    let next = clickable(
+        commands,
+        keys_row,
+        bsn! {
+            Node {
+                flex_direction: FlexDirection::Row, align_items: AlignItems::Center,
+                column_gap: {px(4.)},
+                padding: {UiRect::axes(px(6.), px(3.))},
+                border: {UiRect::all(px(1.))},
+                border_radius: {BorderRadius::all(px(4.))},
+            }
+            BorderColor::all(BADGE_BORDER)
+            Button
+        },
+        EditorAction::SelectSetSwitch,
+        Color::NONE,
+    );
+    child(commands, next, text("NEXT SET", 9., DIM));
+    let nk = child(commands, next, key_badge_box());
+    child(commands, nk, text(&label_or(&cfg.next_set_key), 8., TEAL));
+    child(commands, next, text("›", 11., DIM));
+}
+
+/// Save / Load footer.
 fn build_footer(commands: &mut Commands, parent: Entity, path: &str) {
     let footer = commands
         .spawn_scene(bsn! {
@@ -1006,417 +1694,595 @@ fn build_footer(commands: &mut Commands, parent: Entity, path: &str) {
         })
         .id();
     commands.entity(parent).add_child(footer);
-
     let row = child(
-        commands, footer,
-        bsn! { Node { flex_direction: FlexDirection::Row, column_gap: {px(8.)} } },
+        commands,
+        footer,
+        bsn! {
+            Node { flex_direction: FlexDirection::Row, column_gap: {px(8.)} }
+        },
     );
-    clickable(commands, row, footer_button("SAVE", GREEN, true), EditorAction::Save, GREEN_BG);
-    clickable(commands, row, footer_button("LOAD", DIM, false), EditorAction::Load, Color::NONE);
-
+    clickable(
+        commands,
+        row,
+        footer_button("SAVE", GREEN, true),
+        EditorAction::Save,
+        GREEN_BG,
+    );
+    clickable(
+        commands,
+        row,
+        footer_button("LOAD", DIM, false),
+        EditorAction::Load,
+        Color::NONE,
+    );
     let cap = child(
-        commands, footer,
+        commands,
+        footer,
         bsn! { Node { justify_content: JustifyContent::Center } },
     );
     child(commands, cap, text(path, 9., DIMMER));
 }
 
-// ─── canvas / preview ────────────────────────────────────────────────────────────
+// ─── HUD canvas ──────────────────────────────────────────────────────────────────
 
-/// Builds the right-hand canvas.
-///
-/// When a wheel is selected the canvas shows a full-screen radial preview of
-/// that wheel. All other times it shows the live visual overview — action
-/// buttons rendered at their configured shape/size, and every wheel as a
-/// compact radial render — so any sidebar edit is immediately visible.
-fn build_canvas(commands: &mut Commands, cfg: &QuickActionConfig, ui: &EditorUiState, win_w: f32) {
-    if let Selection::Wheel { set, entry, wheel } = ui.selection {
-        let w = cfg.sets.get(set).and_then(|s| s.entries.get(entry)).and_then(|e| match (e, wheel) {
-            (SetEntry::Wheel(w), None) => Some(w),
-            (SetEntry::WheelSet(ws), Some(i)) => ws.wheels.get(i),
-            _ => None,
-        });
-        if let Some(w) = w {
-            build_wheel_preview(commands, w, win_w);
-            return;
-        }
-    }
-    build_overview(commands, cfg);
-}
-
-/// A full-screen canvas root anchored to the right of the sidebar.
 fn canvas_root() -> impl Scene {
     bsn! {
         Node {
             position_type: PositionType::Absolute,
-            left: {px(258.)},
-            top: {px(0.)},
-            right: {px(0.)},
-            bottom: {px(0.)},
+            left: {px(260.)}, top: {px(0.)}, right: {px(0.)}, bottom: {px(0.)},
             flex_direction: FlexDirection::Column,
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
-            row_gap: {px(10.)},
         }
         BackgroundColor({BG_MAIN})
     }
 }
 
-/// The scrollable overview root (top-left anchored).
-fn overview_root() -> impl Scene {
-    bsn! {
-        Node {
-            position_type: PositionType::Absolute,
-            left: {px(258.)},
-            top: {px(0.)},
-            right: {px(0.)},
-            bottom: {px(0.)},
-            flex_direction: FlexDirection::Column,
-            row_gap: {px(14.)},
-            padding: {UiRect::all(px(24.))},
-            overflow: {Overflow::scroll_y()},
-        }
-        BackgroundColor({BG_MAIN})
-    }
-}
-
-/// Returns `key` or an em dash when unbound.
 fn label_or(key: &str) -> String {
-    if key.is_empty() { "—".into() } else { key.into() }
+    if key.is_empty() {
+        "—".into()
+    } else {
+        key.into()
+    }
 }
 
-/// A color with its alpha multiplied.
 fn with_alpha(c: Color, a: f32) -> Color {
     c.with_alpha(a)
 }
 
-/// Slice background color used in the canvas wheel previews.
-const CANVAS_SLICE_BG: Color = Color::srgb(0.15, 0.20, 0.32);
-
-/// Renders a quick action as a styled button widget on the canvas.
-fn spawn_canvas_action(commands: &mut Commands, parent: Entity, set_opacity: f32, qa: &QuickAction) {
-    let eff    = (set_opacity * qa.opacity).clamp(0.05, 1.0);
-    let sz     = (qa.radius * 0.75).clamp(36., 72.);
-    let corner = match qa.shape {
-        ActionShape::Round   => sz / 2.0,
-        ActionShape::Rounded => sz * 0.25,
-        ActionShape::Square  => 3.0,
-        ActionShape::Diamond => 3.0,  // diamond uses Transform rotation below
-    };
-    let bg      = with_alpha(Color::srgb(0.14, 0.20, 0.33), eff);
-    let bord    = with_alpha(BADGE_BORDER, (eff * 1.4).min(1.0));
-    let icon_c  = with_alpha(AMBER, eff);
-    let text_c  = with_alpha(if qa.show_on_menu { TEXT } else { DIMMER }, (eff * 0.8).min(1.0));
-    let icon_sz = (sz * 0.36).max(10.);
-    let is_diamond = qa.shape == ActionShape::Diamond;
-
-    let col = child(commands, parent, bsn! {
-        Node {
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: {px(4.)},
+/// Parse a `#rrggbb` hex string into a Bevy Color (falls back to a blue tint).
+fn parse_hex_color(hex: &str, alpha: f32) -> Color {
+    let s = hex.trim_start_matches('#');
+    if s.len() == 6 {
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&s[0..2], 16),
+            u8::from_str_radix(&s[2..4], 16),
+            u8::from_str_radix(&s[4..6], 16),
+        ) {
+            return Color::srgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, alpha);
         }
-    });
-
-    if is_diamond {
-        // Diamond: fixed-size container, rotated bg square, unrotated icon overlay.
-        let inner_sz = sz * 0.72;  // side length of rotated square; fits in sz when rotated 45°.
-        let container = child(commands, col, bsn! {
-            Node {
-                width: {px(sz)},
-                height: {px(sz)},
-            }
-        });
-        // Rotated background square (absolute, centered in container).
-        let bg_node = child(commands, container, bsn! {
-            Node {
-                position_type: PositionType::Absolute,
-                left: {px((sz - inner_sz) / 2.)},
-                top: {px((sz - inner_sz) / 2.)},
-                width: {px(inner_sz)},
-                height: {px(inner_sz)},
-                border: {UiRect::all(px(1.))},
-                border_radius: {BorderRadius::all(px(3.))},
-            }
-            BackgroundColor({bg})
-            BorderColor::all(bord)
-        });
-        commands.entity(bg_node).insert(
-            Transform::from_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_4))
-        );
-        // Unrotated icon overlay (absolute, covers full container, centered).
-        let overlay = child(commands, container, bsn! {
-            Node {
-                position_type: PositionType::Absolute,
-                left: {px(0.)},
-                top: {px(0.)},
-                width: {px(sz)},
-                height: {px(sz)},
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-            }
-        });
-        child(commands, overlay, text(&qa.icon, icon_sz, icon_c));
-    } else {
-        let btn = child(commands, col, bsn! {
-            Node {
-                width: {px(sz)},
-                height: {px(sz)},
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                border: {UiRect::all(px(1.))},
-                border_radius: {BorderRadius::all(px(corner))},
-            }
-            BackgroundColor({bg})
-            BorderColor::all(bord)
-        });
-        child(commands, btn, text(&qa.icon, icon_sz, icon_c));
     }
-    if !qa.key.is_empty() {
-        let kb = child(commands, col, key_badge_box());
-        child(commands, kb, text(&qa.key, 8., DIM));
-    }
-    child(commands, col, text(&qa.name, 8., text_c));
+    Color::srgba(0.23, 0.51, 0.96, alpha)
 }
 
-/// Renders a wheel as a compact live radial preview on the canvas.
-fn spawn_canvas_wheel(commands: &mut Commands, parent: Entity, w: &Wheel) {
-    let radius = 88.0_f32;
-    let inner  = 26.0_f32;
-    let n = w.slots.len().max(1);
-    let menu = WheelMenu {
-        slices: n,
-        radius,
-        inner_radius: inner,
-        deadzone: 0.3,
-        gap: 0.03,
-        arc_span: std::f32::consts::TAU,
-        arc_offset: 0.0,
-        overlap: false,
-    };
-    let container_size = radius * 2.2;
-    let slice_sz = (radius - inner) * 0.82;
-    let corner   = slice_sz * 0.2;
-    let disc_r   = (inner - 4.).max(6.);
+/// Build the HUD preview canvas (always visible, regardless of sidebar state).
+fn build_hud_canvas(
+    commands: &mut Commands,
+    cfg: &QuickActionConfig,
+    ui: &EditorUiState,
+    win_w: f32,
+    win_h: f32,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+) {
+    let root = commands
+        .spawn_scene(canvas_root())
+        .insert(EditorCanvasRoot)
+        .id();
 
-    let col = child(commands, parent, bsn! {
-        Node {
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            row_gap: {px(4.)},
-        }
-    });
-    let container = child(commands, col, bsn! {
-        Node {
-            width: {px(container_size)},
-            height: {px(container_size)},
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-        }
-    });
-    let hub = child(commands, container, wheel_hub());
-    let disc = child(commands, hub, wheel_center_disc(disc_r, PANEL_CARD));
-    child(commands, disc, wheel_slice_label(w.name.clone(), (disc_r * 0.38).max(7.), DIM));
-    for (i, slot) in w.slots.iter().enumerate() {
-        if i >= n { break; }
-        let panel = child(
-            commands, hub,
-            wheel_slice_panel_styled(&menu, i, slice_sz, CANVAS_SLICE_BG, corner),
-        );
-        child(commands, panel, wheel_slice_label(slot.clone(), 9., TEXT));
-    }
-    child(commands, col, text(&format!("{:.1}s", w.cooldown_secs), 9., DIM));
-}
+    // "HUD PREVIEW" watermark.
+    let watermark = commands
+        .spawn_scene(bsn! {
+            Node {
+                position_type: PositionType::Absolute,
+                top: {px(16.)}, left: {px(16.)},
+            }
+        })
+        .id();
+    commands.entity(root).add_child(watermark);
+    child(commands, watermark, text("HUD PREVIEW", 10., DIMMER));
 
-/// Builds the live visual overview: action buttons and radial wheel previews.
-fn build_overview(commands: &mut Commands, cfg: &QuickActionConfig) {
-    let root = commands.spawn_scene(overview_root()).insert(EditorCanvasRoot).id();
-
-    // Title + set-switch hint.
-    let head = child(
-        commands, root,
-        bsn! { Node { flex_direction: FlexDirection::Column, row_gap: {px(2.)} } },
-    );
-    child(commands, head, text("MENU PREVIEW", 13., GREEN));
-    child(
-        commands, head,
-        text(
-            &format!(
-                "switch sets   ·   next {}   ·   prev {}",
-                label_or(&cfg.next_set_key),
-                label_or(&cfg.prev_set_key),
-            ),
-            10., DIM,
-        ),
-    );
+    // Set tabs at bottom.
+    build_set_tabs(commands, root, cfg, ui);
 
     if cfg.sets.is_empty() {
-        child(commands, root, text("No sets configured — add one in the sidebar.", 12., DIMMER));
+        child(
+            commands,
+            root,
+            text("No sets — add one in the sidebar.", 12., DIMMER),
+        );
         return;
     }
 
-    for set in &cfg.sets {
-        // Per-set section card.
-        let section = child(commands, root, bsn! {
-            Node {
-                flex_direction: FlexDirection::Column,
-                row_gap: {px(10.)},
-                padding: {UiRect::all(px(12.))},
-                border: {UiRect::all(px(1.))},
-                border_radius: {BorderRadius::all(px(8.))},
-            }
-            BorderColor::all(SIDEBAR_BORDER)
-            BackgroundColor({PANEL_CARD})
-        });
+    // World-space center of the canvas area (used by Pie-shape Mesh2d).
+    // sidebar_w = 260; canvas spans [260, win_w].
+    let sidebar_w = 260.0_f32;
+    let wheel_cx = sidebar_w + (win_w - sidebar_w) / 2.0 - win_w / 2.0;
+    let wheel_cy = 0.0_f32; // canvas is vertically centred
+    let _ = win_h; // reserved for future use
 
-        // Section header row: name + opacity / override tags.
-        let hrow = child(commands, section, bsn! {
-            Node {
-                flex_direction: FlexDirection::Row,
-                justify_content: JustifyContent::SpaceBetween,
-                align_items: AlignItems::Center,
-            }
-        });
-        child(commands, hrow, text(&set.name, 11., TEXT));
-        let tags = child(commands, hrow, hcluster());
-        if set.opacity < 0.999 {
-            child(commands, tags, text(&format!("{:.0}%", set.opacity * 100.0), 9., DIM));
-        }
-        if set.input_override {
-            child(commands, tags, text("⊘ override", 9., AMBER));
-        }
-
-        if set.entries.is_empty() {
-            child(commands, section, text("empty set", 10., DIMMER));
-            continue;
-        }
-
-        // Wrapping content row: buttons and wheels rendered side-by-side.
-        let content = child(commands, section, bsn! {
-            Node {
-                flex_direction: FlexDirection::Row,
-                flex_wrap: FlexWrap::Wrap,
-                column_gap: {px(10.)},
-                row_gap: {px(10.)},
-                align_items: AlignItems::FlexEnd,
-            }
-        });
-
-        for entry in &set.entries {
+    if let Some(set) = cfg.sets.get(ui.active_set) {
+        // Render the first wheel or wheel-set found in the active set.
+        let mut rendered = false;
+        for (ei, entry) in set.entries.iter().enumerate() {
             match entry {
-                SetEntry::Action(qa) => spawn_canvas_action(commands, content, set.opacity, qa),
-                SetEntry::Wheel(w)   => spawn_canvas_wheel(commands, content, w),
-                SetEntry::WheelSet(ws) => {
-                    let grp = child(commands, content, bsn! {
-                        Node {
-                            flex_direction: FlexDirection::Column,
-                            row_gap: {px(6.)},
-                            padding: {UiRect::all(px(8.))},
-                            border: {UiRect::all(px(1.))},
-                            border_radius: {BorderRadius::all(px(6.))},
-                        }
-                        BorderColor::all(BADGE_BORDER)
-                    });
-                    let gh = child(commands, grp, hcluster());
-                    child(commands, gh, text("◈", 10., BLUE));
-                    child(commands, gh, text(&ws.name, 10., TEXT));
-                    let wrow = child(commands, grp, bsn! {
-                        Node {
-                            flex_direction: FlexDirection::Row,
-                            flex_wrap: FlexWrap::Wrap,
-                            column_gap: {px(8.)},
-                            row_gap: {px(8.)},
-                            align_items: AlignItems::FlexEnd,
-                        }
-                    });
-                    for w in &ws.wheels {
-                        spawn_canvas_wheel(commands, wrow, w);
-                    }
+                SetEntry::Wheel(w) => {
+                    build_centered_wheel(
+                        commands,
+                        root,
+                        w,
+                        ui.active_set,
+                        ei,
+                        None,
+                        ui.selection,
+                        wheel_cx,
+                        wheel_cy,
+                        meshes,
+                        materials,
+                    );
+                    rendered = true;
+                    break;
                 }
+                SetEntry::WheelSet(ws) => {
+                    if let Some(w) = ws.wheels.first() {
+                        build_centered_wheel(
+                            commands,
+                            root,
+                            w,
+                            ui.active_set,
+                            ei,
+                            Some(0),
+                            ui.selection,
+                            wheel_cx,
+                            wheel_cy,
+                            meshes,
+                            materials,
+                        );
+                        rendered = true;
+                    }
+                    break;
+                }
+                _ => {}
             }
         }
+        if !rendered {
+            child(commands, root, text("No wheels in this set.", 11., DIMMER));
+        }
+
+        // Floating action buttons.
+        build_hud_buttons(commands, root, set);
     }
 }
 
-
-/// A live radial preview of the selected wheel, centered in the canvas.
-fn build_wheel_preview(commands: &mut Commands, wheel: &Wheel, _win_w: f32) {
-    let root = commands.spawn_scene(canvas_root()).insert(EditorCanvasRoot).id();
-
-    // Hub is the radial origin; absolutely-positioned slices hang off it.
-    let hub = child(commands, root, wheel_hub());
+/// Renders a wheel centred in the canvas.
+/// - Rounded / Square / Circle / Wedge: BSN UI nodes (no interaction).
+/// - Pie: real `Mesh2d` wedge per slice, tagged `WheelMeshPreview`.
+/// Selected segment (from `Selection::Segment`) is highlighted but not interactive.
+#[allow(clippy::too_many_arguments)]
+fn build_centered_wheel(
+    commands: &mut Commands,
+    parent: Entity,
+    wheel: &Wheel,
+    set: usize,
+    entry: usize,
+    w_idx: Option<usize>,
+    selection: Selection,
+    wheel_cx: f32,
+    wheel_cy: f32,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+) {
     let menu = wheel.to_menu();
+    let hub = child(commands, parent, wheel_hub());
 
-    let disc = (menu.inner_radius - 6.0).max(1.0);
-    let center = child(commands, hub, wheel_center_disc(disc, PANEL_CARD));
-    child(commands, center, wheel_slice_label(wheel.name.clone(), 13., TEXT));
+    let is_pie = wheel.segment_shape == SegmentShape::Pie;
 
-    let size = (menu.radius - menu.inner_radius) * 0.78;
-    let corner = size * 0.18;
+    // Background disc and outer ring (skipped for Pie — mesh fills the area).
+    if !is_pie {
+        child(commands, hub, wheel_bg_disc(menu.radius));
+    }
+    child(commands, hub, wheel_outer_ring(menu.radius));
+
+    // ── shared slice metrics ───────────────────────────────────────────
+    let slice_angle = std::f32::consts::TAU / menu.slices.max(1) as f32;
+    let base_panel_w = (2.0 * menu.radius * (slice_angle / 2.0).sin() * 0.72).max(48.0);
+    let base_panel_h = ((menu.radius - menu.inner_radius) * 0.85).max(40.0);
+    let panel_w = (base_panel_w * wheel.segment_scale).max(32.0);
+    let panel_h = (base_panel_h * wheel.segment_scale).max(24.0);
+    let min_dim = panel_w.min(panel_h);
+    let highlight_col = parse_hex_color(&wheel.highlight_color, 1.0);
+    let slice_bg = Color::srgb(0.13, 0.17, 0.23);
+    let label_c = Color::srgb(0.84, 0.89, 0.94);
+    let label_sz = (panel_h * 0.18).clamp(9.0, 13.0);
+
     for (i, slot) in wheel.slots.iter().enumerate() {
         if i >= menu.slices {
             break;
         }
-        let panel = child(
-            commands, hub,
-            wheel_slice_panel_styled(&menu, i, size, Color::srgb(0.16, 0.20, 0.30), corner),
-        );
-        child(commands, panel, wheel_slice_label(slot.clone(), 12., TEXT));
+
+        let slot_name = &slot.name;
+        let icon = &slot.icon;
+        let is_selected = matches!(selection,
+            Selection::Segment { set: s, entry: e, wheel: ww, slot: sl }
+            if s == set && e == entry && ww == w_idx && sl == i);
+        let seg_color = if is_selected { highlight_col } else { slice_bg };
+
+        if is_pie {
+            // ── true Mesh2d wedge ──────────────────────────────────────────
+            let (a0, a1) = slice_angles(&menu, i);
+            let mesh = meshes.add(crate::mesh::wedge(menu.inner_radius, menu.radius, a0, a1));
+            let mat = materials.add(ColorMaterial::from_color(seg_color));
+            commands.spawn((
+                Mesh2d(mesh),
+                MeshMaterial2d(mat),
+                Transform::from_xyz(wheel_cx, wheel_cy, 0.5),
+                WheelMeshPreview,
+            ));
+
+            // Transparent UI panel just for label layout.
+            let ctr = slice_center(&menu, i);
+            let left = ctr.x - panel_w / 2.0;
+            let top_pos = -ctr.y - panel_h / 2.0;
+            let panel_e = commands
+                .spawn_scene(bsn! {
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: {px(left)}, top: {px(top_pos)},
+                        width: {px(panel_w)}, height: {px(panel_h)},
+                        justify_content: JustifyContent::SpaceBetween,
+                        align_items: AlignItems::Center,
+                        flex_direction: FlexDirection::Column,
+                        padding: {UiRect::all(px(6.))},
+                    }
+                    // Transparent — mesh provides the visual background.
+                    BackgroundColor({Color::NONE})
+                })
+                .id();
+            commands.entity(hub).add_child(panel_e);
+
+            if wheel.show_labels {
+                child(
+                    commands,
+                    panel_e,
+                    wheel_slice_label(slot_name.to_uppercase(), label_sz, label_c),
+                );
+            }
+            if wheel.show_icon && !icon.is_empty() {
+                child(
+                    commands,
+                    panel_e,
+                    wheel_slice_label(icon.clone(), label_sz * 1.3, label_c),
+                );
+            } else if wheel.show_labels {
+                child(
+                    commands,
+                    panel_e,
+                    bsn! { Node { width: {px(4.)}, height: {px(4.)} } },
+                );
+            }
+        } else {
+            // ── BSN UI panel ────────────────────────────────────────────────────
+            let seg_br = match wheel.segment_shape {
+                SegmentShape::Square => BorderRadius::all(Val::Px(0.0)),
+                SegmentShape::Rounded => BorderRadius::all(Val::Px(min_dim * 0.14)),
+                SegmentShape::Circle => BorderRadius::all(Val::Px(min_dim * 0.5)),
+                SegmentShape::Wedge => BorderRadius {
+                    top_left: Val::Px(min_dim * 0.40),
+                    top_right: Val::Px(min_dim * 0.40),
+                    bottom_left: Val::Px(min_dim * 0.05),
+                    bottom_right: Val::Px(min_dim * 0.05),
+                },
+                SegmentShape::Pie => unreachable!(),
+            };
+
+            let ctr = slice_center(&menu, i);
+            let left = ctr.x - panel_w / 2.0;
+            let top_pos = -ctr.y - panel_h / 2.0;
+
+            // Panel is purely visual — no Button / EditorButton.
+            let panel_e = commands
+                .spawn_scene(bsn! {
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: {px(left)}, top: {px(top_pos)},
+                        width: {px(panel_w)}, height: {px(panel_h)},
+                        justify_content: JustifyContent::SpaceBetween,
+                        align_items: AlignItems::Center,
+                        flex_direction: FlexDirection::Column,
+                        padding: {UiRect::all(px(6.))},
+                        border_radius: {seg_br},
+                    }
+                    BackgroundColor({seg_color})
+                })
+                .id();
+            commands.entity(hub).add_child(panel_e);
+
+            if wheel.show_labels {
+                child(
+                    commands,
+                    panel_e,
+                    wheel_slice_label(slot_name.to_uppercase(), label_sz, label_c),
+                );
+            }
+            if wheel.show_icon && !icon.is_empty() {
+                child(
+                    commands,
+                    panel_e,
+                    wheel_slice_label(icon.clone(), label_sz * 1.3, label_c),
+                );
+            } else if wheel.show_labels {
+                child(
+                    commands,
+                    panel_e,
+                    bsn! { Node { width: {px(4.)}, height: {px(4.)} } },
+                );
+            }
+        }
     }
 
-    // Caption under the wheel.
-    let caption = child(
-        commands, root,
-        bsn! {
+    // ── centre hub with golden ring ───────────────────────────────────
+    let disc_r = (menu.inner_radius - 4.0).max(8.0);
+    let ring_col = Color::srgb(0.82, 0.64, 0.16);
+    let hub_bg = Color::srgb(0.08, 0.10, 0.14);
+    let center = child(
+        commands,
+        hub,
+        wheel_center_ring(disc_r, hub_bg, ring_col, 3.0),
+    );
+    let hub_label = if !wheel.hold_key.is_empty() {
+        wheel.hold_key.clone()
+    } else {
+        wheel
+            .name
+            .chars()
+            .next()
+            .map(|c| c.to_string())
+            .unwrap_or_default()
+    };
+    child(
+        commands,
+        center,
+        wheel_slice_label(hub_label, (disc_r * 0.60).max(9.0), ring_col),
+    );
+}
+
+/// Floating action buttons overlaid in the bottom-right of the canvas.
+fn build_hud_buttons(commands: &mut Commands, parent: Entity, set: &ActionSet) {
+    let btns: Vec<&QuickAction> = set
+        .entries
+        .iter()
+        .filter_map(|e| {
+            if let SetEntry::Action(a) = e {
+                Some(a)
+            } else {
+                None
+            }
+        })
+        .filter(|a| a.enabled)
+        .collect();
+    if btns.is_empty() {
+        return;
+    }
+
+    let container = commands
+        .spawn_scene(bsn! {
             Node {
                 position_type: PositionType::Absolute,
-                bottom: {px(40.)},
+                bottom: {px(60.)}, right: {px(36.)},
                 flex_direction: FlexDirection::Column,
+                row_gap: {px(8.)},
+                align_items: AlignItems::FlexEnd,
+            }
+        })
+        .id();
+    commands.entity(parent).add_child(container);
+
+    for qa in btns.iter().rev() {
+        spawn_hud_button(commands, container, set.opacity, qa);
+    }
+}
+
+/// One floating HUD button (a quick action rendered in the canvas).
+fn spawn_hud_button(commands: &mut Commands, parent: Entity, set_opacity: f32, qa: &QuickAction) {
+    let eff = (set_opacity * qa.opacity).clamp(0.05, 1.0);
+    let w = qa.width.max(40.0);
+    let h = qa.height.max(20.0);
+    let bg = parse_hex_color(&qa.color, eff * 0.85);
+    let tc = with_alpha(TEXT, eff);
+    let bc = with_alpha(BADGE_BORDER, eff);
+
+    let row = child(
+        commands,
+        parent,
+        bsn! {
+            Node {
+                flex_direction: FlexDirection::Row,
                 align_items: AlignItems::Center,
-                row_gap: {px(4.)},
+                column_gap: {px(5.)},
             }
         },
     );
-    child(commands, caption, text(&wheel.name, 14., TEXT));
-    child(
-        commands, caption,
-        text(&format!("{} slots · {:.0}s cooldown", wheel.slots.len(), wheel.cooldown_secs), 11., DIM),
+
+    // Key badge
+    if !qa.key.is_empty() {
+        let kb = child(
+            commands,
+            row,
+            bsn! {
+                Node {
+                    width: {px(16.)}, height: {px(14.)},
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    position_type: PositionType::Relative,
+                    border: {UiRect::all(px(1.))},
+                    border_radius: {BorderRadius::all(px(2.))},
+                }
+                BorderColor::all(BADGE_BORDER)
+            },
+        );
+        child(commands, kb, text(&qa.key, 7., DIM));
+    }
+
+    // Main button rect
+    let btn = child(
+        commands,
+        row,
+        bsn! {
+            Node {
+                width: {px(w)}, height: {px(h)},
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                border: {UiRect::all(px(1.))},
+                border_radius: {BorderRadius::all(px(4.))},
+            }
+            BackgroundColor({bg})
+            BorderColor::all(bc)
+        },
     );
+    child(commands, btn, text(&qa.name, 10., tc));
+}
+
+/// Set-selection tabs pinned to the bottom of the canvas.
+fn build_set_tabs(
+    commands: &mut Commands,
+    parent: Entity,
+    cfg: &QuickActionConfig,
+    ui: &EditorUiState,
+) {
+    let bar = commands
+        .spawn_scene(bsn! {
+            Node {
+                position_type: PositionType::Absolute,
+                bottom: {px(12.)}, left: {px(0.)}, right: {px(0.)},
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+            }
+        })
+        .id();
+    commands.entity(parent).add_child(bar);
+
+    // ‹ arrow
+    let prev_idx = ui.active_set.saturating_sub(1);
+    let larrow = clickable(
+        commands,
+        bar,
+        bsn! {
+            Node {
+                width: {px(28.)}, height: {px(32.)},
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                border: {UiRect::all(px(1.))},
+                border_radius: {BorderRadius::left(px(6.))},
+            }
+            BorderColor::all(SIDEBAR_BORDER)
+            BackgroundColor({PANEL_CARD})
+            Button
+            Children [ text("‹", 14., DIM) ]
+        },
+        EditorAction::SetActiveSet { set: prev_idx },
+        PANEL_CARD,
+    );
+    let _ = larrow;
+
+    for (i, set) in cfg.sets.iter().enumerate() {
+        let active = i == ui.active_set;
+        let (bg, tc, bc) = if active {
+            (Color::srgba(0.38, 0.62, 0.95, 0.20), TEXT, BLUE)
+        } else {
+            (PANEL_CARD, DIM, SIDEBAR_BORDER)
+        };
+        let tab = clickable(
+            commands,
+            bar,
+            bsn! {
+                Node {
+                    padding: {UiRect::axes(px(14.), px(7.))},
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border: {UiRect::all(px(1.))},
+                }
+                BorderColor::all(bc)
+                BackgroundColor({bg})
+                Button
+            },
+            EditorAction::SetActiveSet { set: i },
+            bg,
+        );
+        child(commands, tab, text(&set.name, 11., tc));
+    }
+
+    // › arrow
+    let next_idx = (ui.active_set + 1).min(cfg.sets.len().saturating_sub(1));
+    let rarrow = clickable(
+        commands,
+        bar,
+        bsn! {
+            Node {
+                width: {px(28.)}, height: {px(32.)},
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                border: {UiRect::all(px(1.))},
+                border_radius: {BorderRadius::right(px(6.))},
+            }
+            BorderColor::all(SIDEBAR_BORDER)
+            BackgroundColor({PANEL_CARD})
+            Button
+            Children [ text("›", 14., DIM) ]
+        },
+        EditorAction::SetActiveSet { set: next_idx },
+        PANEL_CARD,
+    );
+    let _ = rarrow;
 }
 
 // ─── interaction ─────────────────────────────────────────────────────────────────
 
-/// Hover color feedback for clickable controls.
 fn editor_button_feedback(
-    mut q: Query<(&Interaction, &EditorButton, &mut BackgroundColor), Changed<Interaction>>,
+    mut buttons: Query<(
+        &EditorButton,
+        &Interaction,
+        &mut BackgroundColor,
+        Option<&SegmentHoverColor>,
+    )>,
 ) {
-    for (interaction, button, mut bg) in &mut q {
-        bg.0 = match *interaction {
-            Interaction::Hovered | Interaction::Pressed => {
-                if button.base == ROW_SEL { ROW_SEL } else { ROW_HOVER }
-            }
-            Interaction::None => button.base,
+    for (btn, interaction, mut bg, hover_col) in &mut buttons {
+        *bg = match interaction {
+            Interaction::Hovered => BackgroundColor(hover_col.map(|h| h.0).unwrap_or(ROW_HOVER)),
+            Interaction::Pressed => BackgroundColor(ROW_SEL),
+            Interaction::None => BackgroundColor(btn.base),
         };
     }
 }
 
-/// Applies the action of a pressed control to the document / selection.
 fn handle_editor_buttons(
+    buttons: Query<(&EditorButton, &Interaction), Changed<Interaction>>,
     mut cfg: ResMut<QuickActionConfig>,
     mut ui: ResMut<EditorUiState>,
-    q: Query<(&Interaction, &EditorButton), Changed<Interaction>>,
 ) {
-    for (interaction, button) in &q {
-        if *interaction != Interaction::Pressed {
-            continue;
+    for (btn, interaction) in &buttons {
+        if *interaction == Interaction::Pressed {
+            apply_action(&btn.action, &mut cfg, &mut ui);
+            ui.dirty = true;
         }
-        apply_action(&button.action, &mut cfg, &mut ui);
-        ui.dirty = true;
     }
 }
 
+// ─── action application ──────────────────────────────────────────────────────────
+
 fn apply_action(action: &EditorAction, cfg: &mut QuickActionConfig, ui: &mut EditorUiState) {
     match *action {
+        // ── sets ──────────────────────────────────────────────────────────────
         EditorAction::AddSet => {
             let n = cfg.sets.len() + 1;
             cfg.sets.push(ActionSet {
@@ -1425,7 +2291,50 @@ fn apply_action(action: &EditorAction, cfg: &mut QuickActionConfig, ui: &mut Edi
                 input_override: false,
                 entries: Vec::new(),
             });
+            ui.active_set = cfg.sets.len() - 1;
         }
+        EditorAction::DeleteSet { set } => {
+            if set < cfg.sets.len() {
+                cfg.sets.remove(set);
+            }
+            let clear = matches!(ui.selection,
+                Selection::Action { set: s, .. } | Selection::Wheel { set: s, .. }
+                | Selection::Set { set: s } | Selection::WheelSetEntry { set: s, .. }
+                if s == set);
+            if clear {
+                ui.selection = Selection::None;
+                ui.editing = EditFocus::None;
+            }
+            if !cfg.sets.is_empty() {
+                ui.active_set = ui.active_set.min(cfg.sets.len() - 1);
+            }
+        }
+        EditorAction::SelectSet { set } => {
+            ui.selection = Selection::Set { set };
+            ui.editing = EditFocus::None;
+        }
+        EditorAction::EditSetName { set } => {
+            ui.selection = Selection::Set { set };
+            ui.editing = EditFocus::SetName;
+        }
+        EditorAction::SetOpacityDelta { set, delta } => {
+            if let Some(s) = cfg.sets.get_mut(set) {
+                s.opacity = (s.opacity + delta).clamp(0.0, 1.0);
+            }
+        }
+        EditorAction::ToggleInputOverride { set } => {
+            if let Some(s) = cfg.sets.get_mut(set) {
+                s.input_override = !s.input_override;
+            }
+        }
+        EditorAction::SetActiveSet { set } => {
+            if !cfg.sets.is_empty() {
+                ui.active_set = set.min(cfg.sets.len() - 1);
+                ui.selection = Selection::None;
+                ui.editing = EditFocus::None;
+            }
+        }
+        // ── entries ───────────────────────────────────────────────────────────
         EditorAction::AddAction { set } => {
             if let Some(s) = cfg.sets.get_mut(set) {
                 let n = s.entries.len() + 1;
@@ -1445,6 +2354,7 @@ fn apply_action(action: &EditorAction, cfg: &mut QuickActionConfig, ui: &mut Edi
                 s.entries.push(SetEntry::WheelSet(WheelSet {
                     name: "New Wheel Set".into(),
                     wheels: vec![Wheel::new("Wheel 1", 6)],
+                    switch_key: String::new(),
                 }));
             }
         }
@@ -1456,6 +2366,89 @@ fn apply_action(action: &EditorAction, cfg: &mut QuickActionConfig, ui: &mut Edi
                 ws.wheels.push(Wheel::new(format!("Wheel {}", n), 6));
             }
         }
+        EditorAction::DeleteEntry { set, entry } => {
+            if let Some(s) = cfg.sets.get_mut(set) {
+                if entry < s.entries.len() {
+                    s.entries.remove(entry);
+                }
+            }
+            let clear = matches!(ui.selection,
+                Selection::Action { set: s, entry: e } | Selection::Wheel { set: s, entry: e, .. }
+                | Selection::WheelSetEntry { set: s, entry: e } if s == set && e == entry);
+            if clear {
+                ui.selection = Selection::None;
+                ui.editing = EditFocus::None;
+            }
+        }
+        EditorAction::DeleteWheelFromSet { set, entry, wheel } => {
+            if let Some(SetEntry::WheelSet(ws)) =
+                cfg.sets.get_mut(set).and_then(|s| s.entries.get_mut(entry))
+            {
+                if ws.wheels.len() > 1 && wheel < ws.wheels.len() {
+                    ws.wheels.remove(wheel);
+                }
+            }
+            let clear = matches!(ui.selection,
+                Selection::Wheel { set: s, entry: e, wheel: Some(w) } if s == set && e == entry && w == wheel);
+            if clear {
+                ui.selection = Selection::None;
+                ui.editing = EditFocus::None;
+            }
+        }
+        EditorAction::MoveEntryUp { set, entry } => {
+            if entry > 0 {
+                if let Some(s) = cfg.sets.get_mut(set) {
+                    if entry < s.entries.len() {
+                        s.entries.swap(entry - 1, entry);
+                    }
+                }
+                ui.selection = match ui.selection {
+                    Selection::Action { set: s, entry: e } if s == set && e == entry => {
+                        Selection::Action {
+                            set,
+                            entry: entry - 1,
+                        }
+                    }
+                    Selection::Wheel {
+                        set: s,
+                        entry: e,
+                        wheel: w,
+                    } if s == set && e == entry => Selection::Wheel {
+                        set,
+                        entry: entry - 1,
+                        wheel: w,
+                    },
+                    other => other,
+                };
+            }
+        }
+        EditorAction::MoveEntryDown { set, entry } => {
+            let len = cfg.sets.get(set).map(|s| s.entries.len()).unwrap_or(0);
+            if entry + 1 < len {
+                if let Some(s) = cfg.sets.get_mut(set) {
+                    s.entries.swap(entry, entry + 1);
+                }
+                ui.selection = match ui.selection {
+                    Selection::Action { set: s, entry: e } if s == set && e == entry => {
+                        Selection::Action {
+                            set,
+                            entry: entry + 1,
+                        }
+                    }
+                    Selection::Wheel {
+                        set: s,
+                        entry: e,
+                        wheel: w,
+                    } if s == set && e == entry => Selection::Wheel {
+                        set,
+                        entry: entry + 1,
+                        wheel: w,
+                    },
+                    other => other,
+                };
+            }
+        }
+        // ── selection ────────────────────────────────────────────────────────
         EditorAction::SelectAction { set, entry } => {
             ui.selection = Selection::Action { set, entry };
             ui.editing = EditFocus::None;
@@ -1464,6 +2457,27 @@ fn apply_action(action: &EditorAction, cfg: &mut QuickActionConfig, ui: &mut Edi
             ui.selection = Selection::Wheel { set, entry, wheel };
             ui.editing = EditFocus::None;
         }
+        EditorAction::SelectWheelSetEntry { set, entry } => {
+            ui.selection = Selection::WheelSetEntry { set, entry };
+            ui.editing = EditFocus::None;
+        }
+        EditorAction::SelectSetSwitch => {
+            ui.selection = Selection::SetSwitch;
+            ui.editing = EditFocus::None;
+        }
+        EditorAction::NavBack => {
+            ui.editing = EditFocus::None;
+            // From a segment, go back to the parent wheel editor.
+            if let Selection::Segment {
+                set, entry, wheel, ..
+            } = ui.selection
+            {
+                ui.selection = Selection::Wheel { set, entry, wheel };
+            } else {
+                ui.selection = Selection::None;
+            }
+        }
+        // ── quick action editing ─────────────────────────────────────────────
         EditorAction::EditName { set, entry } => {
             ui.selection = Selection::Action { set, entry };
             ui.editing = EditFocus::Name;
@@ -1492,6 +2506,11 @@ fn apply_action(action: &EditorAction, cfg: &mut QuickActionConfig, ui: &mut Edi
                 a.show_on_menu = !a.show_on_menu;
             }
         }
+        EditorAction::ToggleEnabled { set, entry } => {
+            if let Some(a) = action_at(cfg, set, entry) {
+                a.enabled = !a.enabled;
+            }
+        }
         EditorAction::OpacityDelta { set, entry, delta } => {
             if let Some(a) = action_at(cfg, set, entry) {
                 a.opacity = (a.opacity + delta).clamp(0.0, 1.0);
@@ -1500,6 +2519,16 @@ fn apply_action(action: &EditorAction, cfg: &mut QuickActionConfig, ui: &mut Edi
         EditorAction::RadiusDelta { set, entry, delta } => {
             if let Some(a) = action_at(cfg, set, entry) {
                 a.radius = (a.radius + delta).clamp(8.0, 256.0);
+            }
+        }
+        EditorAction::ActionWidthDelta { set, entry, delta } => {
+            if let Some(a) = action_at(cfg, set, entry) {
+                a.width = (a.width + delta).clamp(20.0, 300.0);
+            }
+        }
+        EditorAction::ActionHeightDelta { set, entry, delta } => {
+            if let Some(a) = action_at(cfg, set, entry) {
+                a.height = (a.height + delta).clamp(12.0, 120.0);
             }
         }
         EditorAction::CyclePosition { set, entry } => {
@@ -1512,48 +2541,52 @@ fn apply_action(action: &EditorAction, cfg: &mut QuickActionConfig, ui: &mut Edi
                 a.shape = a.shape.next();
             }
         }
-        EditorAction::SelectSet { set } => {
-            ui.selection = Selection::Set { set };
-            ui.editing = EditFocus::None;
-        }
-        EditorAction::EditSetName { set } => {
-            ui.selection = Selection::Set { set };
-            ui.editing = EditFocus::SetName;
-        }
-        EditorAction::SetOpacityDelta { set, delta } => {
-            if let Some(s) = cfg.sets.get_mut(set) {
-                s.opacity = (s.opacity + delta).clamp(0.0, 1.0);
-            }
-        }
-        EditorAction::ToggleInputOverride { set } => {
-            if let Some(s) = cfg.sets.get_mut(set) {
-                s.input_override = !s.input_override;
-            }
-        }
-        EditorAction::SelectSetSwitch => {
-            ui.selection = Selection::SetSwitch;
-            ui.editing = EditFocus::None;
-        }
-        EditorAction::CaptureNextSetKey => {
-            ui.selection = Selection::SetSwitch;
-            ui.editing = EditFocus::NextSetKey;
-        }
-        EditorAction::CapturePrevSetKey => {
-            ui.selection = Selection::SetSwitch;
-            ui.editing = EditFocus::PrevSetKey;
-        }
+        // ── wheel editing ─────────────────────────────────────────────────────
         EditorAction::EditWheelName => {
             ui.editing = EditFocus::WheelName;
+        }
+        EditorAction::CaptureWheelHoldKey => {
+            ui.editing = EditFocus::WheelHoldKey;
+        }
+        EditorAction::CycleWheelTheme => {
+            if let Some(w) = wheel_at(cfg, ui.selection) {
+                w.theme = w.theme.next();
+            }
         }
         EditorAction::WheelCooldownDelta { delta } => {
             if let Some(w) = wheel_at(cfg, ui.selection) {
                 w.cooldown_secs = (w.cooldown_secs + delta).clamp(0.0, 60.0);
             }
         }
+        EditorAction::WheelOuterRadiusDelta { delta } => {
+            if let Some(w) = wheel_at(cfg, ui.selection) {
+                w.outer_radius = (w.outer_radius + delta).clamp(40.0, 300.0);
+            }
+        }
+        EditorAction::WheelInnerRadiusDelta { delta } => {
+            if let Some(w) = wheel_at(cfg, ui.selection) {
+                w.inner_radius = (w.inner_radius + delta).clamp(8.0, 100.0);
+            }
+        }
+        EditorAction::WheelAnimSpeedDelta { delta } => {
+            if let Some(w) = wheel_at(cfg, ui.selection) {
+                w.anim_speed_ms = (w.anim_speed_ms + delta).clamp(0.0, 2000.0);
+            }
+        }
+        EditorAction::ToggleWheelShowLabels => {
+            if let Some(w) = wheel_at(cfg, ui.selection) {
+                w.show_labels = !w.show_labels;
+            }
+        }
+        EditorAction::ToggleWheelShowInfoInHub => {
+            if let Some(w) = wheel_at(cfg, ui.selection) {
+                w.show_info_in_hub = !w.show_info_in_hub;
+            }
+        }
         EditorAction::AddSlot => {
             if let Some(w) = wheel_at(cfg, ui.selection) {
                 let n = w.slots.len() + 1;
-                w.slots.push(format!("Slot {}", n));
+                w.slots.push(WheelSlotData::named(format!("Slot {}", n)));
             }
         }
         EditorAction::RemoveSlot => {
@@ -1566,92 +2599,111 @@ fn apply_action(action: &EditorAction, cfg: &mut QuickActionConfig, ui: &mut Edi
         EditorAction::EditSlotName { slot } => {
             ui.editing = EditFocus::SlotName(slot);
         }
-        EditorAction::DeleteSet { set } => {
-            if set < cfg.sets.len() {
-                cfg.sets.remove(set);
-            }
-            let clear = match ui.selection {
-                Selection::Action { set: s, .. } => s == set,
-                Selection::Wheel { set: s, .. } => s == set,
-                Selection::Set { set: s } => s == set,
-                _ => false,
-            };
-            if clear {
-                ui.selection = Selection::None;
-                ui.editing = EditFocus::None;
-            }
+        // ── wheel-set entry editing ───────────────────────────────────────────
+        EditorAction::EditWheelSetName { set, entry } => {
+            ui.selection = Selection::WheelSetEntry { set, entry };
+            ui.editing = EditFocus::WheelSetName;
         }
-        EditorAction::DeleteEntry { set, entry } => {
-            if let Some(s) = cfg.sets.get_mut(set) {
-                if entry < s.entries.len() {
-                    s.entries.remove(entry);
-                }
-            }
-            let clear = match ui.selection {
-                Selection::Action { set: s, entry: e } => s == set && e == entry,
-                Selection::Wheel { set: s, entry: e, .. } => s == set && e == entry,
-                _ => false,
-            };
-            if clear {
-                ui.selection = Selection::None;
-                ui.editing = EditFocus::None;
-            }
+        EditorAction::CaptureWheelSetSwitchKey { set, entry } => {
+            ui.selection = Selection::WheelSetEntry { set, entry };
+            ui.editing = EditFocus::WheelSetSwitchKey;
         }
-        EditorAction::DeleteWheelFromSet { set, entry, wheel } => {
-            if let Some(SetEntry::WheelSet(ws)) =
-                cfg.sets.get_mut(set).and_then(|s| s.entries.get_mut(entry))
-            {
-                if ws.wheels.len() > 1 && wheel < ws.wheels.len() {
-                    ws.wheels.remove(wheel);
-                }
-            }
-            let clear = matches!(
-                ui.selection,
-                Selection::Wheel { set: s, entry: e, wheel: Some(w) }
-                    if s == set && e == entry && w == wheel
-            );
-            if clear {
-                ui.selection = Selection::None;
-                ui.editing = EditFocus::None;
-            }
+        // ── set-switch shortcuts ──────────────────────────────────────────────
+        EditorAction::CaptureNextSetKey => {
+            ui.selection = Selection::SetSwitch;
+            ui.editing = EditFocus::NextSetKey;
         }
-        EditorAction::MoveEntryUp { set, entry } => {
-            if entry > 0 {
-                if let Some(s) = cfg.sets.get_mut(set) {
-                    if entry < s.entries.len() {
-                        s.entries.swap(entry - 1, entry);
-                    }
-                }
-                ui.selection = match ui.selection {
-                    Selection::Action { set: s, entry: e } if s == set && e == entry =>
-                        Selection::Action { set, entry: entry - 1 },
-                    Selection::Wheel { set: s, entry: e, wheel: w } if s == set && e == entry =>
-                        Selection::Wheel { set, entry: entry - 1, wheel: w },
-                    other => other,
-                };
-            }
+        EditorAction::CapturePrevSetKey => {
+            ui.selection = Selection::SetSwitch;
+            ui.editing = EditFocus::PrevSetKey;
         }
-        EditorAction::MoveEntryDown { set, entry } => {
-            let len = cfg.sets.get(set).map(|s| s.entries.len()).unwrap_or(0);
-            if entry + 1 < len {
-                if let Some(s) = cfg.sets.get_mut(set) {
-                    s.entries.swap(entry, entry + 1);
-                }
-                ui.selection = match ui.selection {
-                    Selection::Action { set: s, entry: e } if s == set && e == entry =>
-                        Selection::Action { set, entry: entry + 1 },
-                    Selection::Wheel { set: s, entry: e, wheel: w } if s == set && e == entry =>
-                        Selection::Wheel { set, entry: entry + 1, wheel: w },
-                    other => other,
-                };
-            }
-        }
+        // ── persistence ───────────────────────────────────────────────────────
         EditorAction::Save => save_config(cfg, &ui.config_path),
         EditorAction::Load => {
             if let Some(loaded) = load_config(&ui.config_path) {
                 *cfg = loaded;
                 ui.selection = Selection::None;
+                ui.active_set = 0;
             }
+        }
+        // ── segment editing ─────────────────────────────────────────────────
+        EditorAction::SelectSegment {
+            set,
+            entry,
+            wheel,
+            slot,
+        } => {
+            ui.selection = Selection::Segment {
+                set,
+                entry,
+                wheel,
+                slot,
+            };
+            ui.editing = EditFocus::None;
+        }
+        EditorAction::EditSlotIcon { slot } => {
+            ui.editing = EditFocus::SlotIcon(slot);
+        }
+        EditorAction::CycleSegmentShape => {
+            if let Some(w) = wheel_at(cfg, ui.selection) {
+                w.segment_shape = w.segment_shape.next();
+            }
+        }
+        EditorAction::ToggleWheelShowIcon => {
+            if let Some(w) = wheel_at(cfg, ui.selection) {
+                w.show_icon = !w.show_icon;
+            }
+        }
+        EditorAction::CycleHighlightColor => {
+            const COLORS: &[&str] = &[
+                "#f59e0b", "#3b82f6", "#14b8a6", "#8b5cf6", "#22c55e", "#ef4444", "#f97316",
+            ];
+            if let Some(w) = wheel_at(cfg, ui.selection) {
+                w.highlight_color = cycle_in(COLORS, &w.highlight_color).into();
+            }
+        }
+        EditorAction::SegmentScaleDelta { delta } => {
+            if let Some(w) = wheel_at(cfg, ui.selection) {
+                w.segment_scale = (w.segment_scale + delta).clamp(0.5, 2.0);
+            }
+        }
+        // ── segment input / gamepad binding ─────────────────────────────────────────
+        EditorAction::CaptureSlotInput { slot } => {
+            ui.editing = EditFocus::SlotInput(slot);
+        }
+        EditorAction::CaptureGamepadButton { set, entry } => {
+            ui.selection = Selection::Action { set, entry };
+            ui.editing = EditFocus::GamepadButton;
+        }
+        // ── per-slot items ───────────────────────────────────────────────────────────
+        EditorAction::AddSlotItem { slot } => {
+            if let Some(w) = wheel_at(cfg, ui.selection) {
+                if let Some(s) = w.slots.get_mut(slot) {
+                    s.items.push(SlotItem::default());
+                }
+            }
+        }
+        EditorAction::RemoveSlotItem { slot, item } => {
+            if let Some(w) = wheel_at(cfg, ui.selection) {
+                if let Some(s) = w.slots.get_mut(slot) {
+                    if item < s.items.len() {
+                        s.items.remove(item);
+                    }
+                }
+            }
+            // Clear focus if it pointed to a removed item
+            if matches!(ui.editing,
+                EditFocus::SlotItemName(sl, it) | EditFocus::SlotItemIcon(sl, it)
+                if sl == slot && it == item)
+            {
+                ui.editing = EditFocus::None;
+            }
+        }
+        EditorAction::EditSlotItemName { slot, item } => {
+            ui.editing = EditFocus::SlotItemName(slot, item);
+        }
+        EditorAction::EditSlotItemIcon { slot, item } => {
+            ui.editing = EditFocus::SlotItemIcon(slot, item);
         }
     }
 }
@@ -1660,41 +2712,26 @@ fn apply_action(action: &EditorAction, cfg: &mut QuickActionConfig, ui: &mut Edi
 
 fn save_config(cfg: &QuickActionConfig, path: &str) {
     match ron::ser::to_string_pretty(cfg, ron::ser::PrettyConfig::default()) {
-        Ok(text) => {
-            if let Err(e) = std::fs::write(path, text) {
-                warn!("quick action editor: failed to save '{}': {}", path, e);
-            } else {
-                info!("quick action editor: saved configuration to '{}'", path);
-            }
+        Ok(s) => {
+            let _ = std::fs::write(path, s);
         }
-        Err(e) => warn!("quick action editor: failed to serialize configuration: {}", e),
+        Err(e) => eprintln!("[editor] save failed: {e}"),
     }
 }
 
 fn load_config(path: &str) -> Option<QuickActionConfig> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => match ron::from_str::<QuickActionConfig>(&text) {
-            Ok(cfg) => {
-                info!("quick action editor: loaded configuration from '{}'", path);
-                Some(cfg)
-            }
-            Err(e) => {
-                warn!("quick action editor: failed to parse '{}': {}", path, e);
-                None
-            }
-        },
+    let s = std::fs::read_to_string(path).ok()?;
+    match ron::from_str(&s) {
+        Ok(c) => Some(c),
         Err(e) => {
-            warn!("quick action editor: failed to read '{}': {}", path, e);
+            eprintln!("[editor] load failed: {e}");
             None
         }
     }
 }
 
-// ─── inline quick-action editor ──────────────────────────────────────────────────
+// ─── editor card / field helpers ─────────────────────────────────────────────────
 
-const CTRL_BG: Color = Color::srgb(0.11, 0.14, 0.19);
-
-/// The card that holds the inline editor fields, indented under its row.
 fn editor_card() -> impl Scene {
     bsn! {
         Node {
@@ -1708,12 +2745,21 @@ fn editor_card() -> impl Scene {
     }
 }
 
-/// A labelled field row.
+fn section_label(commands: &mut Commands, parent: Entity, label: &str) {
+    let row = child(
+        commands,
+        parent,
+        bsn! {
+            Node { padding: {UiRect::new(px(0.), px(0.), px(6.), px(2.))} }
+        },
+    );
+    child(commands, row, text(label, 10., DIM));
+}
+
 fn field_row() -> impl Scene {
     bsn! {
         Node {
-            width: {percent(100.)},
-            min_height: {px(22.)},
+            width: {percent(100.)}, min_height: {px(22.)},
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
             column_gap: {px(6.)},
@@ -1721,20 +2767,17 @@ fn field_row() -> impl Scene {
     }
 }
 
-/// The fixed-width label cell at the start of a field row.
 fn label_cell(s: &str) -> impl Scene {
     bsn! {
-        Node { width: {px(70.)}, flex_direction: FlexDirection::Row, align_items: AlignItems::Center }
+        Node { width: {px(82.)}, flex_direction: FlexDirection::Row, align_items: AlignItems::Center }
         Children [ text(s, 10., DIM) ]
     }
 }
 
-/// A bordered, clickable value box (grows to fill the row).
 fn ctrl_box(accent: Color) -> impl Scene {
     bsn! {
         Node {
-            flex_grow: 1.,
-            height: {px(20.)},
+            flex_grow: 1., height: {px(20.)},
             padding: {UiRect::horizontal(px(6.))},
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
@@ -1746,12 +2789,10 @@ fn ctrl_box(accent: Color) -> impl Scene {
     }
 }
 
-/// A small square button (stepper − / +).
 fn mini_box() -> impl Scene {
     bsn! {
         Node {
-            width: {px(22.)},
-            height: {px(20.)},
+            width: {px(22.)}, height: {px(20.)},
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
             border_radius: {BorderRadius::all(px(4.))},
@@ -1761,19 +2802,16 @@ fn mini_box() -> impl Scene {
     }
 }
 
-/// A centered, growing value cell (between stepper buttons).
 fn val_cell() -> impl Scene {
     bsn! {
         Node {
-            flex_grow: 1.,
-            height: {px(20.)},
+            flex_grow: 1., height: {px(20.)},
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
         }
     }
 }
 
-/// A toggle pill.
 fn pill_box(bg: Color, accent: Color) -> impl Scene {
     bsn! {
         Node {
@@ -1789,14 +2827,12 @@ fn pill_box(bg: Color, accent: Color) -> impl Scene {
     }
 }
 
-/// Spawn a labelled row and return it for the control to be appended.
 fn spawn_field(commands: &mut Commands, parent: Entity, label: &str) -> Entity {
     let row = child(commands, parent, field_row());
     child(commands, row, label_cell(label));
     row
 }
 
-/// A clickable value-box field (name, key, icon, command, cycles).
 fn spawn_box_field(
     commands: &mut Commands,
     parent: Entity,
@@ -1811,7 +2847,6 @@ fn spawn_box_field(
     child(commands, b, text(value, 11., value_color));
 }
 
-/// A boolean toggle field.
 fn spawn_toggle_field(
     commands: &mut Commands,
     parent: Entity,
@@ -1829,7 +2864,6 @@ fn spawn_toggle_field(
     child(commands, p, text(txt, 10., col));
 }
 
-/// A `− value +` stepper field.
 fn spawn_stepper_field(
     commands: &mut Commands,
     parent: Entity,
@@ -1847,7 +2881,9 @@ fn spawn_stepper_field(
     child(commands, i, text("+", 13., TEXT));
 }
 
-/// Builds the inline editor for the selected quick action.
+// ─── editor panels ────────────────────────────────────────────────────────────────
+
+/// Button / quick-action editor.
 fn spawn_action_editor(
     commands: &mut Commands,
     parent: Entity,
@@ -1856,54 +2892,223 @@ fn spawn_action_editor(
     entry: usize,
     qa: &QuickAction,
 ) {
+    // Panel header: "BUTTON" label + gear/delete
+    let hdr = child(
+        commands,
+        parent,
+        bsn! {
+            Node {
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Center,
+                padding: {UiRect::bottom(px(4.))},
+            }
+        },
+    );
+    child(commands, hdr, text("BUTTON", 10., DIM));
+    let dx = clickable(
+        commands,
+        hdr,
+        del_btn(),
+        EditorAction::DeleteEntry { set, entry },
+        Color::NONE,
+    );
+    child(commands, dx, text("⚙", 10., DIMMER));
+
     let card = child(commands, parent, editor_card());
 
-    // Name (typed).
-    let name_focus = ui.editing == EditFocus::Name;
-    let name_disp = if name_focus { format!("{}|", qa.name) } else { qa.name.clone() };
+    // Label (name)
+    let nf = ui.editing == EditFocus::Name;
+    let nd = if nf {
+        format!("{}|", qa.name)
+    } else {
+        qa.name.clone()
+    };
     spawn_box_field(
-        commands, card, "Name", &name_disp, TEXT,
-        if name_focus { AMBER } else { BADGE_BORDER },
+        commands,
+        card,
+        "Label",
+        &nd,
+        TEXT,
+        if nf { AMBER } else { BADGE_BORDER },
         EditorAction::EditName { set, entry },
     );
 
-    // Input (captured key).
-    let key_focus = ui.editing == EditFocus::Key;
-    let (key_disp, key_col) = if key_focus {
-        ("press a key…".to_string(), AMBER)
-    } else if qa.key.is_empty() {
-        ("unbound".to_string(), DIM)
-    } else {
-        (qa.key.clone(), TEXT)
-    };
+    // Keybind row
+    {
+        let row = spawn_field(commands, card, "Keybind");
+        let kf = ui.editing == EditFocus::Key;
+        let (kd, kc) = if kf {
+            ("press key…".to_string(), AMBER)
+        } else if qa.key.is_empty() {
+            ("unbound".to_string(), DIM)
+        } else {
+            (qa.key.clone(), TEXT)
+        };
+        let kb = clickable(
+            commands,
+            row,
+            bsn! {
+                Node {
+                    width: {px(44.)}, height: {px(20.)},
+                    padding: {UiRect::horizontal(px(4.))},
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border: {UiRect::all(px(1.))},
+                    border_radius: {BorderRadius::all(px(4.))},
+                }
+                BorderColor::all(if kf { AMBER } else { BADGE_BORDER })
+                Button
+            },
+            EditorAction::CaptureKey { set, entry },
+            Color::NONE,
+        );
+        child(commands, kb, text(&kd, 10., kc));
+
+        // Color swatch
+        child(commands, row, text("Color", 9., DIM));
+        let color_val = parse_hex_color(&qa.color, 1.0);
+        let cs = child(
+            commands,
+            row,
+            bsn! {
+                Node {
+                    width: {px(22.)}, height: {px(20.)},
+                    border_radius: {BorderRadius::all(px(3.))},
+                    border: {UiRect::all(px(1.))},
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                }
+                BackgroundColor({color_val})
+                BorderColor::all(BADGE_BORDER)
+            },
+        );
+        child(commands, cs, text(&qa.color, 6., TEXT));
+    }
+
+    // Gamepad button row
+    {
+        let row = spawn_field(commands, card, "Gamepad");
+        let gf = ui.editing == EditFocus::GamepadButton;
+        let (gd, gc) = if gf {
+            ("press button…".to_string(), AMBER)
+        } else if qa.gamepad_button.is_empty() {
+            ("unbound".to_string(), DIM)
+        } else {
+            (qa.gamepad_button.clone(), TEXT)
+        };
+        let gb = clickable(
+            commands,
+            row,
+            bsn! {
+                Node {
+                    width: {px(56.)}, height: {px(20.)},
+                    padding: {UiRect::horizontal(px(4.))},
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border: {UiRect::all(px(1.))},
+                    border_radius: {BorderRadius::all(px(4.))},
+                }
+                BorderColor::all(if gf { AMBER } else { BADGE_BORDER })
+                Button
+            },
+            EditorAction::CaptureGamepadButton { set, entry },
+            Color::NONE,
+        );
+        child(commands, gb, text(&gd, 9., gc));
+    }
+
+    // Action / command
     spawn_box_field(
-        commands, card, "Input", &key_disp, key_col,
-        if key_focus { AMBER } else { BADGE_BORDER },
-        EditorAction::CaptureKey { set, entry },
+        commands,
+        card,
+        "Action",
+        &qa.command,
+        TEAL,
+        BADGE_BORDER,
+        EditorAction::CycleCommand { set, entry },
     );
 
-    // Icon / command (cycled).
-    spawn_box_field(commands, card, "Icon", &qa.icon, AMBER, BADGE_BORDER, EditorAction::CycleIcon { set, entry });
-    spawn_box_field(commands, card, "Command", &qa.command, TEAL, BADGE_BORDER, EditorAction::CycleCommand { set, entry });
+    // Width + Height on one row
+    {
+        let row = child(commands, card, field_row());
+        child(commands, row, label_cell("Width"));
+        let dw = clickable(
+            commands,
+            row,
+            mini_box(),
+            EditorAction::ActionWidthDelta {
+                set,
+                entry,
+                delta: -4.0,
+            },
+            CTRL_BG,
+        );
+        child(commands, dw, text("−", 13., TEXT));
+        let vw = child(commands, row, val_cell());
+        child(commands, vw, text(&format!("{:.0}", qa.width), 11., TEXT));
+        let iw = clickable(
+            commands,
+            row,
+            mini_box(),
+            EditorAction::ActionWidthDelta {
+                set,
+                entry,
+                delta: 4.0,
+            },
+            CTRL_BG,
+        );
+        child(commands, iw, text("+", 13., TEXT));
 
-    // Options.
-    spawn_toggle_field(commands, card, "Hold", qa.hold, EditorAction::ToggleHold { set, entry });
-    spawn_toggle_field(commands, card, "On menu", qa.show_on_menu, EditorAction::ToggleShowOnMenu { set, entry });
-    spawn_stepper_field(
-        commands, card, "Opacity", &format!("{:.0}%", qa.opacity * 100.0),
-        EditorAction::OpacityDelta { set, entry, delta: -0.1 },
-        EditorAction::OpacityDelta { set, entry, delta: 0.1 },
+        child(commands, row, text("H", 9., DIM));
+        let dh = clickable(
+            commands,
+            row,
+            mini_box(),
+            EditorAction::ActionHeightDelta {
+                set,
+                entry,
+                delta: -2.0,
+            },
+            CTRL_BG,
+        );
+        child(commands, dh, text("−", 13., TEXT));
+        let vh = child(commands, row, val_cell());
+        child(commands, vh, text(&format!("{:.0}", qa.height), 11., TEXT));
+        let ih = clickable(
+            commands,
+            row,
+            mini_box(),
+            EditorAction::ActionHeightDelta {
+                set,
+                entry,
+                delta: 2.0,
+            },
+            CTRL_BG,
+        );
+        child(commands, ih, text("+", 13., TEXT));
+    }
+
+    // Enabled toggle
+    spawn_toggle_field(
+        commands,
+        card,
+        "Enabled",
+        qa.enabled,
+        EditorAction::ToggleEnabled { set, entry },
     );
-    spawn_box_field(commands, card, "Position", qa.position.label(), TEXT, BADGE_BORDER, EditorAction::CyclePosition { set, entry });
-    spawn_stepper_field(
-        commands, card, "Radius", &format!("{:.0}", qa.radius),
-        EditorAction::RadiusDelta { set, entry, delta: -4.0 },
-        EditorAction::RadiusDelta { set, entry, delta: 4.0 },
+
+    // Reposition hint
+    child(
+        commands,
+        parent,
+        bsn! {
+            Node { padding: {UiRect::new(px(4.), px(0.), px(8.), px(0.))} }
+            Children [ text("Drag in the preview to reposition.", 9., DIMMER) ]
+        },
     );
-    spawn_box_field(commands, card, "Shape", qa.shape.label(), TEXT, BADGE_BORDER, EditorAction::CycleShape { set, entry });
 }
 
-/// Display text + color for a (possibly focused) key field.
 fn key_display(focus: bool, key: &str) -> (String, Color) {
     if focus {
         ("press a key…".to_string(), AMBER)
@@ -1914,132 +3119,593 @@ fn key_display(focus: bool, key: &str) -> (String, Color) {
     }
 }
 
-/// Builds the inline settings submenu for a selected action set.
-fn spawn_set_editor(
+/// Wheel editor panel.
+fn spawn_wheel_editor(
     commands: &mut Commands,
     parent: Entity,
     ui: &EditorUiState,
-    si: usize,
-    set: &ActionSet,
+    w: &Wheel,
+    set: usize,
+    entry: usize,
+    w_idx: Option<usize>,
 ) {
+    section_label(commands, parent, "WHEEL");
     let card = child(commands, parent, editor_card());
 
-    // Name (typed).
-    let name_focus = ui.editing == EditFocus::SetName;
-    let name_disp = if name_focus { format!("{}|", set.name) } else { set.name.clone() };
+    // Name
+    let nf = ui.editing == EditFocus::WheelName;
+    let nd = if nf {
+        format!("{}|", w.name)
+    } else {
+        w.name.clone()
+    };
     spawn_box_field(
-        commands, card, "Name", &name_disp, TEXT,
-        if name_focus { AMBER } else { BADGE_BORDER },
-        EditorAction::EditSetName { set: si },
-    );
-
-    // Opacity (stepper).
-    spawn_stepper_field(
-        commands, card, "Opacity", &format!("{:.0}%", set.opacity * 100.0),
-        EditorAction::SetOpacityDelta { set: si, delta: -0.1 },
-        EditorAction::SetOpacityDelta { set: si, delta: 0.1 },
-    );
-
-    // Input override for children (toggle).
-    spawn_toggle_field(
-        commands, card, "Override in", set.input_override,
-        EditorAction::ToggleInputOverride { set: si },
-    );
-}
-
-/// Builds the inline config editor for a selected wheel.
-fn spawn_wheel_editor(commands: &mut Commands, parent: Entity, ui: &EditorUiState, w: &Wheel) {
-    let card = child(commands, parent, editor_card());
-
-    // Name (typed).
-    let name_focus = ui.editing == EditFocus::WheelName;
-    let name_disp = if name_focus { format!("{}|", w.name) } else { w.name.clone() };
-    spawn_box_field(
-        commands, card, "Name", &name_disp, TEXT,
-        if name_focus { AMBER } else { BADGE_BORDER },
+        commands,
+        card,
+        "Name",
+        &nd,
+        TEXT,
+        if nf { AMBER } else { BADGE_BORDER },
         EditorAction::EditWheelName,
     );
 
-    // Cooldown (stepper).
-    spawn_stepper_field(
-        commands, card, "Cooldown", &format!("{:.1}s", w.cooldown_secs),
-        EditorAction::WheelCooldownDelta { delta: -0.5 },
-        EditorAction::WheelCooldownDelta { delta: 0.5 },
+    // Hold Key
+    let kf = ui.editing == EditFocus::WheelHoldKey;
+    let (kd, kc) = key_display(kf, &w.hold_key);
+    spawn_box_field(
+        commands,
+        card,
+        "Hold Key",
+        &kd,
+        kc,
+        if kf { AMBER } else { BADGE_BORDER },
+        EditorAction::CaptureWheelHoldKey,
     );
 
-    // Slot count (stepper).
-    spawn_stepper_field(
-        commands, card, "Slots", &format!("{}", w.slots.len()),
-        EditorAction::RemoveSlot, EditorAction::AddSlot,
+    // Theme
+    spawn_box_field(
+        commands,
+        card,
+        "Theme",
+        w.theme.label(),
+        TEXT,
+        BADGE_BORDER,
+        EditorAction::CycleWheelTheme,
     );
 
-    // Slot labels (typed).
-    for (i, slot) in w.slots.iter().enumerate() {
-        let focus = ui.editing == EditFocus::SlotName(i);
-        let disp = if focus { format!("{}|", slot) } else { slot.clone() };
-        spawn_box_field(
-            commands, card, &format!("Slot {}", i + 1), &disp, TEAL,
-            if focus { AMBER } else { BADGE_BORDER },
-            EditorAction::EditSlotName { slot: i },
+    // Outer Radius
+    spawn_stepper_field(
+        commands,
+        card,
+        "Outer Radius",
+        &format!("{:.0}", w.outer_radius),
+        EditorAction::WheelOuterRadiusDelta { delta: -5.0 },
+        EditorAction::WheelOuterRadiusDelta { delta: 5.0 },
+    );
+
+    // Inner Radius
+    spawn_stepper_field(
+        commands,
+        card,
+        "Inner Radius",
+        &format!("{:.0}", w.inner_radius),
+        EditorAction::WheelInnerRadiusDelta { delta: -2.0 },
+        EditorAction::WheelInnerRadiusDelta { delta: 2.0 },
+    );
+
+    // Anim Speed
+    spawn_stepper_field(
+        commands,
+        card,
+        "Anim ms",
+        &format!("{:.0}", w.anim_speed_ms),
+        EditorAction::WheelAnimSpeedDelta { delta: -25.0 },
+        EditorAction::WheelAnimSpeedDelta { delta: 25.0 },
+    );
+
+    // Toggles
+    spawn_toggle_field(
+        commands,
+        card,
+        "Show labels",
+        w.show_labels,
+        EditorAction::ToggleWheelShowLabels,
+    );
+    spawn_toggle_field(
+        commands,
+        card,
+        "Segment in hub",
+        w.show_info_in_hub,
+        EditorAction::ToggleWheelShowInfoInHub,
+    );
+
+    // Segment Shape
+    spawn_box_field(
+        commands,
+        card,
+        "Seg Shape",
+        w.segment_shape.label(),
+        TEXT,
+        BADGE_BORDER,
+        EditorAction::CycleSegmentShape,
+    );
+
+    // Segment Scale
+    spawn_stepper_field(
+        commands,
+        card,
+        "Seg Scale",
+        &format!("{:.1}", w.segment_scale),
+        EditorAction::SegmentScaleDelta { delta: -0.1 },
+        EditorAction::SegmentScaleDelta { delta: 0.1 },
+    );
+
+    // Show Icons
+    spawn_toggle_field(
+        commands,
+        card,
+        "Show icons",
+        w.show_icon,
+        EditorAction::ToggleWheelShowIcon,
+    );
+
+    // Highlight color row
+    {
+        let hcol = parse_hex_color(&w.highlight_color, 1.0);
+        let hex = w.highlight_color.clone();
+        let hrow = spawn_field(commands, card, "Highlight");
+        let b = clickable(
+            commands,
+            hrow,
+            ctrl_box(BADGE_BORDER),
+            EditorAction::CycleHighlightColor,
+            Color::NONE,
         );
+        child(
+            commands,
+            b,
+            bsn! {
+                Node {
+                    width: {px(12.)}, height: {px(12.)},
+                    border_radius: {BorderRadius::all(px(2.))},
+                }
+                BackgroundColor({hcol})
+            },
+        );
+        child(commands, b, text(&hex, 11., TEXT));
+    }
+
+    // Segments section
+    let seg_hdr = child(
+        commands,
+        parent,
+        bsn! {
+            Node {
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Center,
+                padding: {UiRect::new(px(0.), px(0.), px(6.), px(8.))},
+            }
+        },
+    );
+    child(commands, seg_hdr, text("SEGMENTS", 10., DIM));
+    clickable(
+        commands,
+        seg_hdr,
+        bsn! {
+            Node {
+                padding: {UiRect::axes(px(8.), px(3.))},
+                border: {UiRect::all(px(1.))},
+                border_radius: {BorderRadius::all(px(3.))},
+            }
+            BorderColor::all(GREEN)
+            BackgroundColor({GREEN_BG})
+            Button
+            Children [ text("+ Add", 9., GREEN) ]
+        },
+        EditorAction::AddSlot,
+        Color::NONE,
+    );
+
+    let seg_card = child(commands, parent, editor_card());
+    if w.slots.is_empty() {
+        child(commands, seg_card, text("No segments.", 10., DIMMER));
+    }
+    for (i, slot) in w.slots.iter().enumerate() {
+        let is_sel = ui.selection
+            == (Selection::Segment {
+                set,
+                entry,
+                wheel: w_idx,
+                slot: i,
+            });
+        let row_bg = if is_sel { ROW_SEL } else { Color::NONE };
+        let row = clickable(
+            commands,
+            seg_card,
+            row_button(row_bg),
+            EditorAction::SelectSegment {
+                set,
+                entry,
+                wheel: w_idx,
+                slot: i,
+            },
+            row_bg,
+        );
+        let left = child(commands, row, hcluster());
+        child(commands, left, text(&format!("{}", i + 1), 9., DIMMER));
+        if !slot.icon.is_empty() {
+            child(commands, left, text(&slot.icon, 11., TEXT));
+        }
+        child(commands, left, text(&slot.name, 11., TEXT));
+        // Show item count badge if there are items
+        if !slot.items.is_empty() {
+            child(
+                commands,
+                left,
+                text(&format!("[{}]", slot.items.len()), 9., TEAL),
+            );
+        }
+        // Show input badge
+        if !slot.input.is_empty() {
+            let right = child(commands, row, hcluster());
+            let kb = child(commands, right, key_badge_box());
+            child(commands, kb, text(&slot.input, 8., DIM));
+        }
+        let right2 = child(commands, row, hcluster());
+        let dx = clickable(
+            commands,
+            right2,
+            del_btn(),
+            EditorAction::RemoveSlot,
+            Color::NONE,
+        );
+        child(commands, dx, text("×", 10., DIMMER));
     }
 }
 
-/// Builds the top-of-tree set-switching shortcut submenu.
-fn build_set_switch(
+/// Segment editor panel — per-slot name, icon, input binding, and items list.
+fn spawn_segment_editor(
     commands: &mut Commands,
     parent: Entity,
     ui: &EditorUiState,
-    cfg: &QuickActionConfig,
+    slot: usize,
+    w: &Wheel,
 ) {
-    let group = child(commands, parent, col());
+    let slot_data = w.slots.get(slot);
+    let slot_name = slot_data.map(|s| s.name.as_str()).unwrap_or("");
+    let slot_icon = slot_data.map(|s| s.icon.as_str()).unwrap_or("");
+    let slot_input = slot_data.map(|s| s.input.as_str()).unwrap_or("");
+    let items = slot_data.map(|s| s.items.as_slice()).unwrap_or(&[]);
 
-    let selected = ui.selection == Selection::SetSwitch;
-    let hb = if selected { ROW_SEL } else { Color::NONE };
-    let header = clickable(
-        commands, group, set_header_row(hb), EditorAction::SelectSetSwitch, hb,
+    section_label(commands, parent, "SEGMENT");
+    let card = child(commands, parent, editor_card());
+
+    // Name
+    let nf = ui.editing == EditFocus::SlotName(slot);
+    let nd = if nf {
+        format!("{}|", slot_name)
+    } else {
+        slot_name.to_string()
+    };
+    spawn_box_field(
+        commands,
+        card,
+        "Name",
+        &nd,
+        TEXT,
+        if nf { AMBER } else { BADGE_BORDER },
+        EditorAction::EditSlotName { slot },
     );
-    let hc = child(commands, header, hcluster());
-    child(commands, hc, text("⇄", 10., TEAL));
-    child(commands, hc, text("Set Switching", 11., TEXT));
-    child(commands, header, text("⚙", 10., DIM));
 
-    if !selected {
-        return;
+    // Icon
+    let icon_f = ui.editing == EditFocus::SlotIcon(slot);
+    let id = if icon_f {
+        format!("{}|", slot_icon)
+    } else {
+        slot_icon.to_string()
+    };
+    spawn_box_field(
+        commands,
+        card,
+        "Icon",
+        &id,
+        TEXT,
+        if icon_f { AMBER } else { BADGE_BORDER },
+        EditorAction::EditSlotIcon { slot },
+    );
+
+    // Input binding (keyboard key or gamepad button)
+    let inp_kf = ui.editing == EditFocus::SlotInput(slot);
+    let (inp_d, inp_c) = if inp_kf {
+        ("press key / button…".to_string(), AMBER)
+    } else if slot_input.is_empty() {
+        ("unbound".to_string(), DIM)
+    } else {
+        (slot_input.to_string(), TEXT)
+    };
+    spawn_box_field(
+        commands,
+        card,
+        "Input",
+        &inp_d,
+        inp_c,
+        if inp_kf { AMBER } else { BADGE_BORDER },
+        EditorAction::CaptureSlotInput { slot },
+    );
+
+    // ── Items section ───────────────────────────────────────────────────────────
+    let items_hdr = child(
+        commands,
+        parent,
+        bsn! {
+            Node {
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Center,
+                padding: {UiRect::new(px(0.), px(0.), px(6.), px(8.))},
+            }
+        },
+    );
+    child(commands, items_hdr, text("ITEMS", 10., DIM));
+    clickable(
+        commands,
+        items_hdr,
+        bsn! {
+            Node {
+                padding: {UiRect::axes(px(8.), px(3.))},
+                border: {UiRect::all(px(1.))},
+                border_radius: {BorderRadius::all(px(3.))},
+            }
+            BorderColor::all(TEAL)
+            Button
+            Children [ text("+ Add", 9., TEAL) ]
+        },
+        EditorAction::AddSlotItem { slot },
+        Color::NONE,
+    );
+
+    let icard = child(commands, parent, editor_card());
+    if items.is_empty() {
+        child(
+            commands,
+            icard,
+            text("No items. Add one above.", 10., DIMMER),
+        );
+    }
+    for (ii, item) in items.iter().enumerate() {
+        let item_row = child(
+            commands,
+            icard,
+            bsn! {
+                Node {
+                    width: {percent(100.)}, height: {px(26.)},
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: {px(4.)},
+                }
+            },
+        );
+        child(commands, item_row, text(&format!("{}", ii + 1), 9., DIMMER));
+
+        // Item name field
+        let iname_f = ui.editing == EditFocus::SlotItemName(slot, ii);
+        let item_nd = if iname_f {
+            format!("{}|", item.name)
+        } else if item.name.is_empty() {
+            "name…".to_string()
+        } else {
+            item.name.clone()
+        };
+        let nb = clickable(
+            commands,
+            item_row,
+            bsn! {
+                Node {
+                    flex_grow: 1., height: {px(20.)},
+                    padding: {UiRect::horizontal(px(6.))},
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    border: {UiRect::all(px(1.))},
+                    border_radius: {BorderRadius::all(px(4.))},
+                }
+                BorderColor::all(if iname_f { AMBER } else { BADGE_BORDER })
+                Button
+            },
+            EditorAction::EditSlotItemName { slot, item: ii },
+            Color::NONE,
+        );
+        child(
+            commands,
+            nb,
+            text(&item_nd, 10., if iname_f { AMBER } else { TEXT }),
+        );
+
+        // Item icon field
+        let iicon_f = ui.editing == EditFocus::SlotItemIcon(slot, ii);
+        let item_id = if iicon_f {
+            format!("{}|", item.icon)
+        } else if item.icon.is_empty() {
+            "◆".to_string()
+        } else {
+            item.icon.clone()
+        };
+        let ib = clickable(
+            commands,
+            item_row,
+            bsn! {
+                Node {
+                    width: {px(28.)}, height: {px(20.)},
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border: {UiRect::all(px(1.))},
+                    border_radius: {BorderRadius::all(px(4.))},
+                }
+                BorderColor::all(if iicon_f { AMBER } else { BADGE_BORDER })
+                Button
+            },
+            EditorAction::EditSlotItemIcon { slot, item: ii },
+            Color::NONE,
+        );
+        child(
+            commands,
+            ib,
+            text(&item_id, 10., if iicon_f { AMBER } else { DIM }),
+        );
+
+        let dx = clickable(
+            commands,
+            item_row,
+            del_btn(),
+            EditorAction::RemoveSlotItem { slot, item: ii },
+            Color::NONE,
+        );
+        child(commands, dx, text("×", 10., DIMMER));
+    }
+}
+
+/// WheelSet-entry editor panel.
+fn spawn_wheelset_entry_editor(
+    commands: &mut Commands,
+    parent: Entity,
+    ui: &EditorUiState,
+    set: usize,
+    entry: usize,
+    ws: &WheelSet,
+) {
+    section_label(commands, parent, "WHEEL SET");
+    let card = child(commands, parent, editor_card());
+
+    // Name
+    let nf = ui.editing == EditFocus::WheelSetName;
+    let nd = if nf {
+        format!("{}|", ws.name)
+    } else {
+        ws.name.clone()
+    };
+    spawn_box_field(
+        commands,
+        card,
+        "Name",
+        &nd,
+        TEXT,
+        if nf { AMBER } else { BADGE_BORDER },
+        EditorAction::EditWheelSetName { set, entry },
+    );
+
+    // Switch Key
+    let kf = ui.editing == EditFocus::WheelSetSwitchKey;
+    let (kd, kc) = key_display(kf, &ws.switch_key);
+    spawn_box_field(
+        commands,
+        card,
+        "Switch Key",
+        &kd,
+        kc,
+        if kf { AMBER } else { BADGE_BORDER },
+        EditorAction::CaptureWheelSetSwitchKey { set, entry },
+    );
+
+    // Wheels sub-list
+    let wh_hdr = child(
+        commands,
+        parent,
+        bsn! {
+            Node {
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::SpaceBetween,
+                align_items: AlignItems::Center,
+                padding: {UiRect::new(px(0.), px(0.), px(6.), px(8.))},
+            }
+        },
+    );
+    child(commands, wh_hdr, text("WHEELS", 10., DIM));
+    clickable(
+        commands,
+        wh_hdr,
+        bsn! {
+            Node {
+                padding: {UiRect::axes(px(8.), px(3.))},
+                border: {UiRect::all(px(1.))},
+                border_radius: {BorderRadius::all(px(3.))},
+            }
+            BorderColor::all(BLUE)
+            Button
+            Children [ text("+ Add", 9., BLUE) ]
+        },
+        EditorAction::AddWheelToSet { set, entry },
+        Color::NONE,
+    );
+
+    let wcard = child(commands, parent, editor_card());
+    if ws.wheels.is_empty() {
+        child(commands, wcard, text("No wheels.", 10., DIMMER));
+    }
+    for (wi, w) in ws.wheels.iter().enumerate() {
+        let wsel = ui.selection
+            == (Selection::Wheel {
+                set,
+                entry,
+                wheel: Some(wi),
+            });
+        let badge = if w.hold_key.is_empty() {
+            Badge::None
+        } else {
+            Badge::Key(w.hold_key.clone())
+        };
+        spawn_entry_row(
+            commands,
+            wcard,
+            wsel,
+            EditorAction::SelectWheel {
+                set,
+                entry,
+                wheel: Some(wi),
+            },
+            "○",
+            ICON,
+            &w.name,
+            TEAL,
+            badge,
+            Some(EditorAction::DeleteWheelFromSet {
+                set,
+                entry,
+                wheel: wi,
+            }),
+        );
     }
 
-    let body = child(commands, group, indent_col());
-    let card = child(commands, body, editor_card());
-
-    let nf = ui.editing == EditFocus::NextSetKey;
-    let (nd, nc) = key_display(nf, &cfg.next_set_key);
-    spawn_box_field(
-        commands, card, "Next set", &nd, nc,
-        if nf { AMBER } else { BADGE_BORDER }, EditorAction::CaptureNextSetKey,
-    );
-
-    let pf = ui.editing == EditFocus::PrevSetKey;
-    let (pd, pc) = key_display(pf, &cfg.prev_set_key);
-    spawn_box_field(
-        commands, card, "Prev set", &pd, pc,
-        if pf { AMBER } else { BADGE_BORDER }, EditorAction::CapturePrevSetKey,
+    // Hint
+    child(
+        commands,
+        parent,
+        bsn! {
+            Node { padding: {UiRect::new(px(4.), px(0.), px(8.), px(0.))} }
+            Children [ text("Select a wheel above to edit its\nsegments and settings.", 9., DIMMER) ]
+        },
     );
 }
 
-// ─── keyboard input ──────────────────────────────────────────────────────────────
+// ─── helpers ─────────────────────────────────────────────────────────────────────
 
-/// Borrow the [`QuickAction`] at `(set, entry)`, if that entry is an action.
-fn action_at<'a>(cfg: &'a mut QuickActionConfig, set: usize, entry: usize) -> Option<&'a mut QuickAction> {
+fn action_at<'a>(
+    cfg: &'a mut QuickActionConfig,
+    set: usize,
+    entry: usize,
+) -> Option<&'a mut QuickAction> {
     match cfg.sets.get_mut(set).and_then(|s| s.entries.get_mut(entry)) {
         Some(SetEntry::Action(a)) => Some(a),
         _ => None,
     }
 }
 
-/// Borrow the [`Wheel`] referenced by a wheel selection, if any.
 fn wheel_at(cfg: &mut QuickActionConfig, sel: Selection) -> Option<&mut Wheel> {
-    let Selection::Wheel { set, entry, wheel } = sel else {
-        return None;
+    let (set, entry, wheel) = match sel {
+        Selection::Wheel { set, entry, wheel } => (set, entry, wheel),
+        Selection::Segment {
+            set, entry, wheel, ..
+        } => (set, entry, wheel),
+        _ => return None,
     };
     match cfg.sets.get_mut(set).and_then(|s| s.entries.get_mut(entry)) {
         Some(SetEntry::Wheel(w)) if wheel.is_none() => Some(w),
@@ -2048,7 +3714,6 @@ fn wheel_at(cfg: &mut QuickActionConfig, sel: Selection) -> Option<&mut Wheel> {
     }
 }
 
-/// Borrow the name string currently focused for typing, if any.
 fn focused_name<'a>(cfg: &'a mut QuickActionConfig, ui: &EditorUiState) -> Option<&'a mut String> {
     match ui.editing {
         EditFocus::Name => match ui.selection {
@@ -2060,13 +3725,41 @@ fn focused_name<'a>(cfg: &'a mut QuickActionConfig, ui: &EditorUiState) -> Optio
             _ => None,
         },
         EditFocus::WheelName => wheel_at(cfg, ui.selection).map(|w| &mut w.name),
-        EditFocus::SlotName(i) => wheel_at(cfg, ui.selection).and_then(move |w| w.slots.get_mut(i)),
+        EditFocus::SlotName(i) => {
+            wheel_at(cfg, ui.selection).and_then(move |w| w.slots.get_mut(i).map(|s| &mut s.name))
+        }
+        EditFocus::SlotIcon(i) => {
+            wheel_at(cfg, ui.selection).and_then(move |w| w.slots.get_mut(i).map(|s| &mut s.icon))
+        }
+        EditFocus::SlotInput(i) => {
+            wheel_at(cfg, ui.selection).and_then(move |w| w.slots.get_mut(i).map(|s| &mut s.input))
+        }
+        EditFocus::SlotItemName(slot, item) => wheel_at(cfg, ui.selection)
+            .and_then(move |w| w.slots.get_mut(slot))
+            .and_then(move |s| s.items.get_mut(item).map(|it| &mut it.name)),
+        EditFocus::SlotItemIcon(slot, item) => wheel_at(cfg, ui.selection)
+            .and_then(move |w| w.slots.get_mut(slot))
+            .and_then(move |s| s.items.get_mut(item).map(|it| &mut it.icon)),
+        EditFocus::WheelSetName => match ui.selection {
+            Selection::WheelSetEntry { set, entry } => cfg
+                .sets
+                .get_mut(set)
+                .and_then(|s| s.entries.get_mut(entry))
+                .and_then(|e| {
+                    if let SetEntry::WheelSet(ws) = e {
+                        Some(&mut ws.name)
+                    } else {
+                        None
+                    }
+                }),
+            _ => None,
+        },
         _ => None,
     }
 }
 
-/// Types into the focused name (action / set / wheel / slot) while a name field
-/// is active.
+// ─── keyboard input ───────────────────────────────────────────────────────────────
+
 fn editor_text_input(
     mut messages: MessageReader<KeyboardInput>,
     mut cfg: ResMut<QuickActionConfig>,
@@ -2074,7 +3767,15 @@ fn editor_text_input(
 ) {
     if !matches!(
         ui.editing,
-        EditFocus::Name | EditFocus::SetName | EditFocus::WheelName | EditFocus::SlotName(_)
+        EditFocus::Name
+            | EditFocus::SetName
+            | EditFocus::WheelName
+            | EditFocus::SlotName(_)
+            | EditFocus::SlotIcon(_)
+            | EditFocus::SlotInput(_)
+            | EditFocus::SlotItemName(_, _)
+            | EditFocus::SlotItemIcon(_, _)
+            | EditFocus::WheelSetName
     ) {
         messages.clear();
         return;
@@ -2124,15 +3825,21 @@ fn editor_text_input(
     }
 }
 
-/// Captures the next key press into the focused key field (action binding or a
-/// set-switch shortcut) while a key field is active.
 fn editor_capture_key(
     keys: Res<ButtonInput<KeyCode>>,
     mut cfg: ResMut<QuickActionConfig>,
     mut ui: ResMut<EditorUiState>,
 ) {
     let focus = ui.editing;
-    if !matches!(focus, EditFocus::Key | EditFocus::NextSetKey | EditFocus::PrevSetKey) {
+    if !matches!(
+        focus,
+        EditFocus::Key
+            | EditFocus::NextSetKey
+            | EditFocus::PrevSetKey
+            | EditFocus::WheelHoldKey
+            | EditFocus::WheelSetSwitchKey
+            | EditFocus::SlotInput(_)
+    ) {
         return;
     }
 
@@ -2150,8 +3857,29 @@ fn editor_capture_key(
                         }
                     }
                 }
+                EditFocus::WheelHoldKey => {
+                    if let Some(w) = wheel_at(&mut cfg, ui.selection) {
+                        w.hold_key = label;
+                    }
+                }
+                EditFocus::WheelSetSwitchKey => {
+                    if let Selection::WheelSetEntry { set, entry } = ui.selection {
+                        if let Some(SetEntry::WheelSet(ws)) =
+                            cfg.sets.get_mut(set).and_then(|s| s.entries.get_mut(entry))
+                        {
+                            ws.switch_key = label;
+                        }
+                    }
+                }
                 EditFocus::NextSetKey => cfg.next_set_key = label,
                 EditFocus::PrevSetKey => cfg.prev_set_key = label,
+                EditFocus::SlotInput(slot) => {
+                    if let Some(w) = wheel_at(&mut cfg, ui.selection) {
+                        if let Some(s) = w.slots.get_mut(slot) {
+                            s.input = label;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -2161,15 +3889,82 @@ fn editor_capture_key(
     }
 }
 
-/// A short, human-readable label for a key code.
+fn editor_capture_gamepad(
+    gamepads: Query<&Gamepad>,
+    mut cfg: ResMut<QuickActionConfig>,
+    mut ui: ResMut<EditorUiState>,
+) {
+    let focus = ui.editing;
+    if !matches!(focus, EditFocus::GamepadButton | EditFocus::SlotInput(_)) {
+        return;
+    }
+    const BUTTONS: &[GamepadButton] = &[
+        GamepadButton::South,
+        GamepadButton::East,
+        GamepadButton::North,
+        GamepadButton::West,
+        GamepadButton::LeftTrigger,
+        GamepadButton::RightTrigger,
+        GamepadButton::LeftTrigger2,
+        GamepadButton::RightTrigger2,
+        GamepadButton::Start,
+        GamepadButton::Select,
+        GamepadButton::LeftThumb,
+        GamepadButton::RightThumb,
+    ];
+    for gamepad in &gamepads {
+        for &btn in BUTTONS {
+            if gamepad.just_pressed(btn) {
+                let label = gamepad_btn_label(btn);
+                match focus {
+                    EditFocus::GamepadButton => {
+                        if let Selection::Action { set, entry } = ui.selection {
+                            if let Some(a) = action_at(&mut cfg, set, entry) {
+                                a.gamepad_button = label;
+                            }
+                        }
+                    }
+                    EditFocus::SlotInput(slot) => {
+                        if let Some(w) = wheel_at(&mut cfg, ui.selection) {
+                            if let Some(s) = w.slots.get_mut(slot) {
+                                s.input = format!("GP:{}", label);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                ui.editing = EditFocus::None;
+                ui.dirty = true;
+                return;
+            }
+        }
+    }
+}
+
 fn key_label(k: KeyCode) -> String {
     let dbg = format!("{:?}", k);
     let s = dbg.strip_prefix("Key").unwrap_or(&dbg);
-    let s = s.strip_prefix("Digit").unwrap_or(s);
-    s.to_string()
+    s.strip_prefix("Digit").unwrap_or(s).to_string()
 }
 
-/// Whether a key code is a bare modifier (ignored during capture).
+fn gamepad_btn_label(btn: GamepadButton) -> String {
+    match btn {
+        GamepadButton::South => "A".into(),
+        GamepadButton::East => "B".into(),
+        GamepadButton::North => "Y".into(),
+        GamepadButton::West => "X".into(),
+        GamepadButton::LeftTrigger => "LB".into(),
+        GamepadButton::RightTrigger => "RB".into(),
+        GamepadButton::LeftTrigger2 => "LT".into(),
+        GamepadButton::RightTrigger2 => "RT".into(),
+        GamepadButton::Start => "Start".into(),
+        GamepadButton::Select => "Select".into(),
+        GamepadButton::LeftThumb => "LS".into(),
+        GamepadButton::RightThumb => "RS".into(),
+        _ => format!("{:?}", btn),
+    }
+}
+
 fn is_modifier(k: KeyCode) -> bool {
     matches!(
         k,

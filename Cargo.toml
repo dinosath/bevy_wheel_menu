@@ -9,6 +9,7 @@ bevy = { version = "0.19", default-features = true }
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"
 bevy_tweening = "0.16"
+leafwing-input-manager = "0.21"
 
 [[example]]
 name = "gamepad"
