@@ -206,22 +206,22 @@ struct WheelRoot {
     wheel_type: WheelType,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone, Default)]
 struct SliceVisual {
     index: usize,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone, Default)]
 struct SliceIcon {
     index: usize,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone, Default)]
 struct SliceLabel {
     index: usize,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone, Default)]
 struct SliceAmmoText {
     index: usize,
 }
@@ -267,7 +267,10 @@ fn main() {
                 update_ability_cooldowns,
                 update_hud,
                 on_hover_changed,
+                on_hold_progress,
                 on_wheel_select,
+                on_hold_activated,
+                on_low_ammo,
             ),
         )
         .run();
@@ -293,7 +296,7 @@ fn spawn_hud(commands: &mut Commands) {
         HealthDisplay,
         Text2d::new("HP: 100 | Shield: 50"),
         TextFont {
-            font_size: 20.0,
+            font_size: FontSize::Px(20.0),
             ..default()
         },
         TextColor(fps_theme::HUD_TEXT),
@@ -306,7 +309,7 @@ fn spawn_hud(commands: &mut Commands) {
         WeaponDisplay,
         Text2d::new("🎯 AR-15"),
         TextFont {
-            font_size: 24.0,
+            font_size: FontSize::Px(24.0),
             ..default()
         },
         TextColor(fps_theme::HUD_TEXT),
@@ -318,7 +321,7 @@ fn spawn_hud(commands: &mut Commands) {
         AmmoDisplay,
         Text2d::new("30/30"),
         TextFont {
-            font_size: 18.0,
+            font_size: FontSize::Px(18.0),
             ..default()
         },
         TextColor(fps_theme::AMMO_TEXT),
@@ -330,7 +333,7 @@ fn spawn_hud(commands: &mut Commands) {
         HudElement,
         Text2d::new("LB: Weapons | RB: Abilities | RT: Shoot"),
         TextFont {
-            font_size: 14.0,
+            font_size: FontSize::Px(14.0),
             ..default()
         },
         TextColor(Color::srgba(0.6, 0.6, 0.6, 0.8)),
@@ -344,7 +347,7 @@ fn spawn_crosshair(commands: &mut Commands) {
         Crosshair,
         Text2d::new("+"),
         TextFont {
-            font_size: 32.0,
+            font_size: FontSize::Px(32.0),
             ..default()
         },
         TextColor(fps_theme::CROSSHAIR),
@@ -358,7 +361,7 @@ fn spawn_player_marker(commands: &mut Commands) {
         PlayerMarker,
         Text2d::new("▲"),
         TextFont {
-            font_size: 24.0,
+            font_size: FontSize::Px(24.0),
             ..default()
         },
         TextColor(Color::srgba(0.3, 0.8, 0.3, 0.9)),
@@ -366,91 +369,60 @@ fn spawn_player_marker(commands: &mut Commands) {
     ));
 }
 
-fn spawn_weapon_wheel(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<ColorMaterial>,
-    player_state: &PlayerState,
-) {
+fn spawn_weapon_wheel(commands: &mut Commands, player_state: &PlayerState) {
     let menu = WheelMenu {
         slices: WEAPONS.len(),
         radius: 200.0,
         inner_radius: 70.0,
         deadzone: 0.3,
         gap: 0.03,
+        ..default()
     };
 
+    // Full-screen overlay (library `bsn!` builder) carrying the wheel-menu logic.
+    // release_to_use: navigate to a weapon, release the stick → equips it.
+    // slow_time: pauses virtual time while the wheel is visible (Wheeler-style).
     let root = commands
-        .spawn((
+        .spawn_scene(wheel_overlay())
+        .insert((
             WheelRoot {
                 wheel_type: WheelType::Weapon,
             },
             menu.clone(),
             WheelState::default(),
-            Transform::default(),
-            Visibility::Visible,
+            WheelMenuConfig {
+                time_mode: TimeMode::Slow(0.15),
+                casting_mode: CastingMode::ReleaseToUse,
+                auto_snap: true,
+                ..default()
+            },
         ))
         .id();
 
-    for (i, weapon) in WEAPONS.iter().enumerate() {
-        let (a0, a1) = slice_angles(&menu, i);
-        let mesh_handle = meshes.add(mesh::wedge(menu.inner_radius, menu.radius, a0, a1));
+    // Zero-size hub at screen center used as the positioning origin.
+    let hub = commands.spawn_scene(wheel_hub()).id();
+    commands.entity(root).add_child(hub);
 
-        // Highlight currently equipped weapon
+    // Center disc with label.
+    let disc = (menu.inner_radius - 8.0).max(1.0);
+    let center = commands.spawn_scene(wheel_center_disc(disc, fps_theme::BACKGROUND)).id();
+    let hub_label = commands
+        .spawn_scene(wheel_slice_label("WEAPONS".into(), 14.0, fps_theme::TEXT_NORMAL))
+        .id();
+    commands.entity(center).add_child(hub_label);
+    commands.entity(hub).add_child(center);
+
+    let size = 92.0_f32;
+    for (i, weapon) in WEAPONS.iter().enumerate() {
+        // Highlight currently equipped weapon.
         let base_color = if *weapon == player_state.current_weapon {
             fps_theme::SLICE_EQUIPPED
         } else {
             fps_theme::SLICE_BASE
         };
-        let mat_handle = mats.add(ColorMaterial::from_color(base_color));
 
-        let slice_entity = commands
-            .spawn((
-                WheelSlice { index: i },
-                SliceVisual { index: i },
-                Mesh2d(mesh_handle),
-                MeshMaterial2d(mat_handle),
-                Transform::from_translation(Vec3::Z * 0.0),
-            ))
-            .id();
-
-        commands.entity(root).add_child(slice_entity);
-
-        let center = slice_center(&menu, i);
-
-        // Icon
-        let icon_entity = commands
-            .spawn((
-                SliceIcon { index: i },
-                Text2d::new(weapon.icon()),
-                TextFont {
-                    font_size: 26.0,
-                    ..default()
-                },
-                TextColor(fps_theme::ICON_NORMAL),
-                Transform::from_translation(Vec3::new(center.x, center.y + 15.0, 1.0)),
-            ))
-            .id();
-
-        commands.entity(root).add_child(icon_entity);
-
-        // Label
-        let label_entity = commands
-            .spawn((
-                SliceLabel { index: i },
-                Text2d::new(weapon.name()),
-                TextFont {
-                    font_size: 11.0,
-                    ..default()
-                },
-                TextColor(fps_theme::TEXT_NORMAL),
-                Transform::from_translation(Vec3::new(center.x, center.y - 5.0, 1.0)),
-            ))
-            .id();
-
-        commands.entity(root).add_child(label_entity);
-
-        // Ammo count
+        let icon = weapon.icon().to_string();
+        let name = weapon.name().to_string();
         let ammo = player_state.ammo.get(weapon).copied().unwrap_or(0);
         let ammo_text = if weapon.max_ammo() > 0 {
             format!("{}/{}", ammo, weapon.max_ammo())
@@ -458,197 +430,135 @@ fn spawn_weapon_wheel(
             "∞".to_string()
         };
 
-        let ammo_entity = commands
-            .spawn((
-                SliceAmmoText { index: i },
-                Text2d::new(ammo_text),
-                TextFont {
-                    font_size: 9.0,
-                    ..default()
-                },
-                TextColor(fps_theme::AMMO_TEXT),
-                Transform::from_translation(Vec3::new(center.x, center.y - 18.0, 1.0)),
+        // Library builds the positioned, rounded panel via `bsn!`.
+        // WheelSliceCount exposes ammo to the library's low-count system.
+        let max_ammo = weapon.max_ammo();
+        let low_threshold = if max_ammo > 4 { max_ammo / 4 } else { max_ammo };
+        let slice = commands
+            .spawn_scene(wheel_slice_panel(&menu, i, size, base_color))
+            .insert((
+                SliceVisual { index: i },
+                WheelSlice { index: i },
+                WheelSliceCount { current: ammo, max: max_ammo, low_threshold, ..default() },
             ))
             .id();
 
-        commands.entity(root).add_child(ammo_entity);
+        let icon_entity = commands
+            .spawn_scene(wheel_slice_icon(icon, 26.0, fps_theme::ICON_NORMAL))
+            .insert(SliceIcon { index: i })
+            .id();
+        let label_entity = commands
+            .spawn_scene(wheel_slice_label(name, 12.0, fps_theme::TEXT_NORMAL))
+            .insert(SliceLabel { index: i })
+            .id();
+        let ammo_entity = commands
+            .spawn_scene(wheel_slice_label(ammo_text, 10.0, fps_theme::AMMO_TEXT))
+            .insert(SliceAmmoText { index: i })
+            .id();
+
+        commands
+            .entity(slice)
+            .add_children(&[icon_entity, label_entity, ammo_entity]);
+        commands.entity(hub).add_child(slice);
     }
-
-    // Center circle
-    let center_mesh = meshes.add(Circle::new(menu.inner_radius - 8.0));
-    let center_mat = mats.add(ColorMaterial::from_color(fps_theme::BACKGROUND));
-    let center_entity = commands
-        .spawn((
-            Mesh2d(center_mesh),
-            MeshMaterial2d(center_mat),
-            Transform::from_translation(Vec3::Z * 2.0),
-        ))
-        .id();
-
-    commands.entity(root).add_child(center_entity);
-
-    // Center text
-    let center_text = commands
-        .spawn((
-            Text2d::new("WEAPONS"),
-            TextFont {
-                font_size: 14.0,
-                ..default()
-            },
-            TextColor(fps_theme::TEXT_NORMAL),
-            Transform::from_translation(Vec3::Z * 3.0),
-        ))
-        .id();
-
-    commands.entity(root).add_child(center_text);
 }
 
-fn spawn_ability_wheel(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    mats: &mut Assets<ColorMaterial>,
-    player_state: &PlayerState,
-) {
+fn spawn_ability_wheel(commands: &mut Commands, player_state: &PlayerState) {
     let menu = WheelMenu {
         slices: ABILITIES.len(),
         radius: 180.0,
         inner_radius: 60.0,
         deadzone: 0.3,
         gap: 0.04,
+        ..default()
     };
 
+    // hold_to_activate: hold the stick on an ability for 0.8 s to fire it.
+    // slow_time: pauses the game while the wheel is visible.
     let root = commands
-        .spawn((
+        .spawn_scene(wheel_overlay())
+        .insert((
             WheelRoot {
                 wheel_type: WheelType::Ability,
             },
             menu.clone(),
             WheelState::default(),
-            Transform::default(),
-            Visibility::Visible,
+            WheelMenuConfig {
+                time_mode: TimeMode::Slow(0.15),
+                casting_mode: CastingMode::HoldToActivate { duration: 0.8 },
+                auto_snap: true,
+                ..default()
+            },
+            WheelHoldState::default(),
         ))
         .id();
 
-    for (i, ability) in ABILITIES.iter().enumerate() {
-        let (a0, a1) = slice_angles(&menu, i);
-        let mesh_handle = meshes.add(mesh::wedge(menu.inner_radius, menu.radius, a0, a1));
+    let hub = commands.spawn_scene(wheel_hub()).id();
+    commands.entity(root).add_child(hub);
 
+    let disc = (menu.inner_radius - 5.0).max(1.0);
+    let center = commands.spawn_scene(wheel_center_disc(disc, fps_theme::BACKGROUND)).id();
+    let hub_label = commands
+        .spawn_scene(wheel_slice_label("ABILITIES".into(), 13.0, fps_theme::TEXT_NORMAL))
+        .id();
+    commands.entity(center).add_child(hub_label);
+    commands.entity(hub).add_child(center);
+
+    let size = 84.0_f32;
+    for (i, ability) in ABILITIES.iter().enumerate() {
         let cooldown = player_state
             .ability_cooldowns
             .get(ability)
             .copied()
             .unwrap_or(0.0);
-        let base_color = if cooldown > 0.0 {
+        let on_cd = cooldown > 0.0;
+        let base_color = if on_cd {
             Color::srgba(0.3, 0.3, 0.3, 0.7)
         } else {
             fps_theme::SLICE_BASE
         };
-        let mat_handle = mats.add(ColorMaterial::from_color(base_color));
-
-        let slice_entity = commands
-            .spawn((
-                WheelSlice { index: i },
-                SliceVisual { index: i },
-                Mesh2d(mesh_handle),
-                MeshMaterial2d(mat_handle),
-                Transform::from_translation(Vec3::Z * 0.0),
-            ))
-            .id();
-
-        commands.entity(root).add_child(slice_entity);
-
-        let center = slice_center(&menu, i);
-
-        // Icon
-        let icon_entity = commands
-            .spawn((
-                SliceIcon { index: i },
-                Text2d::new(ability.icon()),
-                TextFont {
-                    font_size: 28.0,
-                    ..default()
-                },
-                TextColor(if cooldown > 0.0 {
-                    Color::srgba(0.4, 0.4, 0.4, 0.8)
-                } else {
-                    fps_theme::ICON_NORMAL
-                }),
-                Transform::from_translation(Vec3::new(center.x, center.y + 12.0, 1.0)),
-            ))
-            .id();
-
-        commands.entity(root).add_child(icon_entity);
-
-        // Label
-        let label_entity = commands
-            .spawn((
-                SliceLabel { index: i },
-                Text2d::new(ability.name()),
-                TextFont {
-                    font_size: 11.0,
-                    ..default()
-                },
-                TextColor(fps_theme::TEXT_NORMAL),
-                Transform::from_translation(Vec3::new(center.x, center.y - 8.0, 1.0)),
-            ))
-            .id();
-
-        commands.entity(root).add_child(label_entity);
-
-        // Cooldown indicator
-        let cooldown_text = if cooldown > 0.0 {
+        let icon_color = if on_cd {
+            Color::srgba(0.4, 0.4, 0.4, 0.8)
+        } else {
+            fps_theme::ICON_NORMAL
+        };
+        let cd_text = if on_cd {
             format!("{:.1}s", cooldown)
         } else {
             "Ready".to_string()
         };
+        let cd_color = if on_cd {
+            Color::srgba(1.0, 0.3, 0.3, 1.0)
+        } else {
+            Color::srgba(0.3, 1.0, 0.3, 1.0)
+        };
+        let icon = ability.icon().to_string();
+        let name = ability.name().to_string();
 
-        let cooldown_entity = commands
-            .spawn((
-                SliceAmmoText { index: i },
-                Text2d::new(cooldown_text),
-                TextFont {
-                    font_size: 9.0,
-                    ..default()
-                },
-                TextColor(if cooldown > 0.0 {
-                    Color::srgba(1.0, 0.3, 0.3, 1.0)
-                } else {
-                    Color::srgba(0.3, 1.0, 0.3, 1.0)
-                }),
-                Transform::from_translation(Vec3::new(center.x, center.y - 20.0, 1.0)),
-            ))
+        // Library builds the positioned, rounded panel via `bsn!`.
+        let slice = commands
+            .spawn_scene(wheel_slice_panel(&menu, i, size, base_color))
+            .insert((SliceVisual { index: i }, WheelSlice { index: i }))
             .id();
 
-        commands.entity(root).add_child(cooldown_entity);
+        let icon_entity = commands
+            .spawn_scene(wheel_slice_icon(icon, 28.0, icon_color))
+            .insert(SliceIcon { index: i })
+            .id();
+        let label_entity = commands
+            .spawn_scene(wheel_slice_label(name, 12.0, fps_theme::TEXT_NORMAL))
+            .insert(SliceLabel { index: i })
+            .id();
+        let cd_entity = commands
+            .spawn_scene(wheel_slice_label(cd_text, 10.0, cd_color))
+            .insert(SliceAmmoText { index: i })
+            .id();
+
+        commands
+            .entity(slice)
+            .add_children(&[icon_entity, label_entity, cd_entity]);
+        commands.entity(hub).add_child(slice);
     }
-
-    // Center circle
-    let center_mesh = meshes.add(Circle::new(menu.inner_radius - 5.0));
-    let center_mat = mats.add(ColorMaterial::from_color(fps_theme::BACKGROUND));
-    let center_entity = commands
-        .spawn((
-            Mesh2d(center_mesh),
-            MeshMaterial2d(center_mat),
-            Transform::from_translation(Vec3::Z * 2.0),
-        ))
-        .id();
-
-    commands.entity(root).add_child(center_entity);
-
-    // Center text
-    let center_text = commands
-        .spawn((
-            Text2d::new("ABILITIES"),
-            TextFont {
-                font_size: 13.0,
-                ..default()
-            },
-            TextColor(fps_theme::TEXT_NORMAL),
-            Transform::from_translation(Vec3::Z * 3.0),
-        ))
-        .id();
-
-    commands.entity(root).add_child(center_text);
 }
 
 fn despawn_wheels(commands: &mut Commands, wheel_query: &Query<Entity, With<WheelRoot>>) {
@@ -659,8 +569,6 @@ fn despawn_wheels(commands: &mut Commands, wheel_query: &Query<Entity, With<Whee
 
 fn handle_wheel_toggle(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut mats: ResMut<Assets<ColorMaterial>>,
     gamepads: Query<&Gamepad>,
     wheel_query: Query<Entity, With<WheelRoot>>,
     mut active_wheel: ResMut<ActiveWheel>,
@@ -687,11 +595,11 @@ fn handle_wheel_toggle(
 
         match desired_wheel {
             Some(WheelType::Weapon) => {
-                spawn_weapon_wheel(&mut commands, &mut meshes, &mut mats, &player_state);
+                spawn_weapon_wheel(&mut commands, &player_state);
                 info!("Opened weapon wheel");
             }
             Some(WheelType::Ability) => {
-                spawn_ability_wheel(&mut commands, &mut meshes, &mut mats, &player_state);
+                spawn_ability_wheel(&mut commands, &player_state);
                 info!("Opened ability wheel");
             }
             None => {
@@ -814,37 +722,32 @@ fn update_hud(
 
 fn on_hover_changed(
     mut hover_events: MessageReader<WheelMenuHoverChanged>,
-    mut slice_visuals: Query<(&SliceVisual, &MeshMaterial2d<ColorMaterial>)>,
+    mut slice_visuals: Query<(&SliceVisual, &mut BackgroundColor)>,
     mut slice_icons: Query<(&SliceIcon, &mut TextColor), Without<SliceLabel>>,
     mut slice_labels: Query<(&SliceLabel, &mut TextColor), Without<SliceIcon>>,
-    mut mats: ResMut<Assets<ColorMaterial>>,
     active_wheel: Res<ActiveWheel>,
     player_state: Res<PlayerState>,
 ) {
     for event in hover_events.read() {
-        for (visual, mat_handle) in &mut slice_visuals {
-            if let Some(mat) = mats.get_mut(&mat_handle.0) {
-                let is_hovered = event.current == Some(visual.index);
+        for (visual, mut bg) in &mut slice_visuals {
+            let is_hovered = event.current == Some(visual.index);
 
-                // Check if this slice is the equipped weapon (for weapon wheel)
-                let is_equipped = match active_wheel.wheel_type {
-                    Some(WheelType::Weapon) => {
-                        WEAPONS
-                            .get(visual.index)
-                            .map(|w| *w == player_state.current_weapon)
-                            .unwrap_or(false)
-                    }
-                    _ => false,
-                };
+            // Check if this slice is the equipped weapon (for weapon wheel)
+            let is_equipped = match active_wheel.wheel_type {
+                Some(WheelType::Weapon) => WEAPONS
+                    .get(visual.index)
+                    .map(|w| *w == player_state.current_weapon)
+                    .unwrap_or(false),
+                _ => false,
+            };
 
-                mat.color = if is_hovered {
-                    fps_theme::SLICE_HOVER
-                } else if is_equipped {
-                    fps_theme::SLICE_EQUIPPED
-                } else {
-                    fps_theme::SLICE_BASE
-                };
-            }
+            bg.0 = if is_hovered {
+                fps_theme::SLICE_HOVER
+            } else if is_equipped {
+                fps_theme::SLICE_EQUIPPED
+            } else {
+                fps_theme::SLICE_BASE
+            };
         }
 
         for (icon, mut color) in &mut slice_icons {
@@ -867,42 +770,86 @@ fn on_hover_changed(
     }
 }
 
+/// Handles weapon selection via Release-to-Use (stick snaps to centre).
+/// Ability activation is handled by `on_hold_activated` via WheelMenuHoldActivated.
 fn on_wheel_select(
     mut select_events: MessageReader<WheelMenuSelected>,
     active_wheel: Res<ActiveWheel>,
     mut player_state: ResMut<PlayerState>,
 ) {
     for event in select_events.read() {
-        match active_wheel.wheel_type {
-            Some(WheelType::Weapon) => {
-                if let Some(weapon) = WEAPONS.get(event.index) {
-                    player_state.current_weapon = *weapon;
-                    info!("Equipped weapon: {} {}", weapon.icon(), weapon.name());
-                }
+        if let Some(WheelType::Weapon) = active_wheel.wheel_type {
+            if let Some(weapon) = WEAPONS.get(event.index) {
+                player_state.current_weapon = *weapon;
+                info!("Equipped weapon: {} {}", weapon.icon(), weapon.name());
             }
-            Some(WheelType::Ability) => {
-                if let Some(ability) = ABILITIES.get(event.index) {
-                    let cooldown = player_state
-                        .ability_cooldowns
-                        .get(ability)
-                        .copied()
-                        .unwrap_or(0.0);
+        }
+    }
+}
 
-                    if cooldown <= 0.0 {
-                        player_state
-                            .ability_cooldowns
-                            .insert(*ability, ability.cooldown());
-                        info!("Used ability: {} {}", ability.icon(), ability.name());
-                    } else {
-                        info!(
-                            "Ability {} on cooldown: {:.1}s remaining",
-                            ability.name(),
-                            cooldown
-                        );
-                    }
+/// Fires when the hold-to-activate threshold is reached on the ability wheel.
+fn on_hold_activated(
+    mut activate_events: MessageReader<WheelMenuHoldActivated>,
+    active_wheel: Res<ActiveWheel>,
+    mut player_state: ResMut<PlayerState>,
+) {
+    for event in activate_events.read() {
+        if let Some(WheelType::Ability) = active_wheel.wheel_type {
+            if let Some(ability) = ABILITIES.get(event.index) {
+                let cooldown = player_state
+                    .ability_cooldowns
+                    .get(ability)
+                    .copied()
+                    .unwrap_or(0.0);
+                if cooldown <= 0.0 {
+                    player_state
+                        .ability_cooldowns
+                        .insert(*ability, ability.cooldown());
+                    info!("Used ability (hold): {} {}", ability.icon(), ability.name());
+                } else {
+                    info!(
+                        "Ability {} on cooldown: {:.1}s remaining",
+                        ability.name(),
+                        cooldown
+                    );
                 }
             }
-            None => {}
+        }
+    }
+}
+
+/// Brightens the hovered ability slice as the hold charge builds (0 → 1).
+fn on_hold_progress(
+    mut progress_events: MessageReader<WheelMenuHoldProgress>,
+    mut slice_visuals: Query<(&SliceVisual, &mut BackgroundColor)>,
+) {
+    for event in progress_events.read() {
+        let t = event.progress;
+        for (visual, mut bg) in &mut slice_visuals {
+            if visual.index == event.index {
+                // Blend from SLICE_HOVER toward a bright charged tint as t → 1.
+                bg.0 = Color::srgba(
+                    0.2 + 0.6 * t,
+                    0.5 + 0.45 * t,
+                    0.9 + 0.1 * t,
+                    0.95,
+                );
+            }
+        }
+    }
+}
+
+/// Turns the ammo counter bright red when the library emits a low-ammo warning.
+fn on_low_ammo(
+    mut low_events: MessageReader<WheelMenuLowCount>,
+    mut ammo_texts: Query<(&SliceAmmoText, &mut TextColor)>,
+) {
+    for event in low_events.read() {
+        for (ammo_text, mut color) in &mut ammo_texts {
+            if ammo_text.index == event.index {
+                color.0 = Color::srgba(1.0, 0.15, 0.15, 1.0);
+                info!("Low ammo on slot {}: {} remaining", event.index, event.current);
+            }
         }
     }
 }
