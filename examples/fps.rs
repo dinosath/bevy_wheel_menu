@@ -279,6 +279,7 @@ fn setup(mut commands: Commands, mut cfg: ResMut<QuickActionConfig>) {
         cycle_sets: false,
         edit_shortcut: String::new(),
         hud_open_mode: HudOpenMode::Hold,
+        hud_bg_opacity: 1.0,
         sets: vec![
             ActionSet {
                 name: "Weapons".into(),

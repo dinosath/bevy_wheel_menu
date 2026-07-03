@@ -4,10 +4,11 @@
 //! Rendering is left to the application.
 
 pub mod editor;
-pub mod mesh;
 
 use bevy::color::Alpha;
 use bevy::prelude::*;
+use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::shader::ShaderRef;
 use leafwing_input_manager::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -208,44 +209,6 @@ pub enum WheelNavAction {
     CycleBack,
 }
 
-/// Configuration for a wheel menu.
-#[derive(Component, Clone)]
-pub struct WheelMenu {
-    /// Number of slices in the wheel.
-    pub slices: usize,
-    /// Outer radius of the wheel.
-    pub radius: f32,
-    /// Inner radius (hole in the center).
-    pub inner_radius: f32,
-    /// Deadzone for input (0.0 - 1.0).
-    pub deadzone: f32,
-    /// Gap between slices in radians.
-    pub gap: f32,
-    /// Total angular span of the wheel in radians.  `TAU` is a full circle;
-    /// `PI` is a half wheel, etc.  Slices are distributed across this span.
-    pub arc_span: f32,
-    /// Angle (radians) at which the first slice begins, measured CCW from the
-    /// +X axis.  Use this to rotate / re-anchor a partial-arc wheel.
-    pub arc_offset: f32,
-    /// When `true`, slices touch (no gap) and panels are sized to overlap.
-    pub overlap: bool,
-}
-
-impl Default for WheelMenu {
-    fn default() -> Self {
-        Self {
-            slices: 8,
-            radius: 120.0,
-            inner_radius: 40.0,
-            deadzone: 0.25,
-            gap: 0.02,
-            arc_span: std::f32::consts::TAU,
-            arc_offset: 0.0,
-            overlap: false,
-        }
-    }
-}
-
 /// Marks a slice within a wheel menu.
 #[derive(Component, Clone)]
 pub struct WheelSlice {
@@ -435,7 +398,7 @@ pub enum WheelToggleMode {
 
 /// Full configuration for a wheel menu.
 ///
-/// Attach alongside [`WheelMenu`] and [`WheelState`].  Enum variants guarantee
+/// Attach alongside [`WheelData`] and [`WheelState`].  Enum variants guarantee
 /// **conflict-free** feature combinations: only one `TimeMode` and one
 /// `CastingMode` can be active at a time.
 #[derive(Component, Clone)]
@@ -970,7 +933,8 @@ impl Plugin for QuickActionHudPlugin {
 
         // ── HUD canvas ────────────────────────────────────────────────────────
         if self.hud {
-            app.init_resource::<QuickActionConfig>()
+            app.add_plugins(UiMaterialPlugin::<WedgeMaterial>::default())
+                .init_resource::<QuickActionConfig>()
                 .init_resource::<WheelHudState>()
                 .init_resource::<GamepadIconSet>()
                 .add_message::<HudSegmentSelected>()
@@ -1068,7 +1032,7 @@ pub fn update_wheel_input(
 pub fn update_wheel_hover(
     mut q: Query<(
         Entity,
-        &WheelMenu,
+        &WheelData,
         &mut WheelState,
         Option<&WheelMenuConfig>,
     )>,
@@ -1085,8 +1049,8 @@ pub fn update_wheel_hover(
             // Angle relative to the arc start, wrapped into [0, TAU).
             let rel = (a - menu.arc_offset).rem_euclid(std::f32::consts::TAU);
             if rel <= menu.arc_span {
-                let idx = ((rel / menu.arc_span) * menu.slices as f32).floor() as usize;
-                state.hovered = Some(idx.min(menu.slices.saturating_sub(1)));
+                let idx = ((rel / menu.arc_span) * menu.slots.len().max(1) as f32).floor() as usize;
+                state.hovered = Some(idx.min(menu.slots.len().max(1).saturating_sub(1)));
             } else {
                 // Direction points outside a partial arc.
                 state.hovered = None;
@@ -1341,7 +1305,7 @@ pub fn check_low_counts(
 /// slice in edit mode.
 pub fn update_edit_mode(
     gamepads: Query<&Gamepad>,
-    mut q: Query<(Entity, &WheelMenu, &WheelState, &mut WheelEditMode)>,
+    mut q: Query<(Entity, &WheelData, &WheelState, &mut WheelEditMode)>,
     mut mode_ev: MessageWriter<WheelEditModeChanged>,
     mut reorder_ev: MessageWriter<WheelSliceReorder>,
 ) {
@@ -1365,7 +1329,9 @@ pub fn update_edit_mode(
                             menu_entity: entity,
                         });
                     }
-                    if gamepad.just_pressed(GamepadButton::DPadDown) && hovered + 1 < menu.slices {
+                    if gamepad.just_pressed(GamepadButton::DPadDown)
+                        && hovered + 1 < menu.slots.len().max(1)
+                    {
                         reorder_ev.write(WheelSliceReorder {
                             from_index: hovered,
                             to_index: hovered + 1,
@@ -1449,8 +1415,9 @@ pub fn resolve_wheel_input(
 }
 
 /// Helper to calculate slice angles with gap.
-pub fn slice_angles(menu: &WheelMenu, index: usize) -> (f32, f32) {
-    let slice_angle = menu.arc_span / menu.slices as f32;
+pub fn slice_angles(menu: &WheelData, index: usize) -> (f32, f32) {
+    let n = menu.slots.len().max(1);
+    let slice_angle = menu.arc_span / n as f32;
     let half_gap = if menu.overlap { 0.0 } else { menu.gap / 2.0 };
     let a0 = menu.arc_offset + index as f32 * slice_angle + half_gap;
     let a1 = menu.arc_offset + (index + 1) as f32 * slice_angle - half_gap;
@@ -1458,10 +1425,10 @@ pub fn slice_angles(menu: &WheelMenu, index: usize) -> (f32, f32) {
 }
 
 /// Helper to get the center position of a slice (for placing icons/text).
-pub fn slice_center(menu: &WheelMenu, index: usize) -> Vec2 {
+pub fn slice_center(menu: &WheelData, index: usize) -> Vec2 {
     let (a0, a1) = slice_angles(menu, index);
     let center_angle = (a0 + a1) / 2.0;
-    let center_radius = (menu.inner_radius + menu.radius) / 2.0;
+    let center_radius = (menu.inner_radius + menu.outer_radius) / 2.0;
     Vec2::new(
         center_angle.cos() * center_radius,
         center_angle.sin() * center_radius,
@@ -1472,7 +1439,7 @@ pub fn slice_center(menu: &WheelMenu, index: usize) -> Vec2 {
 /// authored with the [`bsn!`] macro.
 ///
 /// Spawn it with `commands.spawn_scene(wheel_overlay())` and attach the
-/// wheel-menu logic components ([`WheelMenu`] and [`WheelState`]) to the
+/// wheel-menu logic components ([`WheelData`] and [`WheelState`]) to the
 /// resulting entity.
 pub fn wheel_overlay() -> impl bevy::scene::prelude::Scene {
     bsn! {
@@ -1506,7 +1473,7 @@ pub fn wheel_hub() -> impl bevy::scene::prelude::Scene {
 /// background color. The panel is laid out as a centered vertical column so
 /// icons and labels can be added as children.
 pub fn wheel_slice_panel(
-    menu: &WheelMenu,
+    menu: &WheelData,
     index: usize,
     size: f32,
     color: Color,
@@ -1518,7 +1485,7 @@ pub fn wheel_slice_panel(
 /// caller pick a slot shape: `size * 0.5` ≈ round, `size * 0.18` ≈ rounded,
 /// `0.0` = square.
 pub fn wheel_slice_panel_styled(
-    menu: &WheelMenu,
+    menu: &WheelData,
     index: usize,
     size: f32,
     color: Color,
@@ -1642,7 +1609,7 @@ pub fn wheel_outer_ring(
 /// `width` and `height` are in logical pixels.  Use `corner_radius` ≈
 /// `min(width, height) * 0.15` for the rounded look shown in the screenshots.
 pub fn wheel_slice_panel_rect(
-    menu: &WheelMenu,
+    menu: &WheelData,
     index: usize,
     width: f32,
     height: f32,
@@ -1853,6 +1820,18 @@ fn _default_segment_scale() -> f32 {
 fn _default_border_width() -> f32 {
     2.0
 }
+fn _default_deadzone() -> f32 {
+    0.3
+}
+fn _default_gap() -> f32 {
+    0.04
+}
+fn _default_arc_span() -> f32 {
+    std::f32::consts::TAU
+}
+fn _default_arc_offset() -> f32 {
+    std::f32::consts::FRAC_PI_6
+}
 
 // ── slot / item data ─────────────────────────────────────────────────────────────
 
@@ -1932,7 +1911,7 @@ impl Default for QuickAction {
 // ── wheel config data ────────────────────────────────────────────────────────────
 
 /// Editor data-model wheel — one radial menu with named segments.
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Component, Clone, Serialize, Deserialize, Debug)]
 #[serde(default)]
 pub struct WheelData {
     pub name: String,
@@ -1981,6 +1960,21 @@ pub struct WheelData {
     /// Opacity of the hub (inner circle) background (0.0 – 1.0).
     #[serde(default = "_full_opacity")]
     pub hub_opacity: f32,
+    /// Stick deadzone for the headless ECS input API (0.0–1.0).
+    #[serde(default = "_default_deadzone")]
+    pub deadzone: f32,
+    /// Gap between segments in radians (used by the headless ECS API).
+    #[serde(default = "_default_gap")]
+    pub gap: f32,
+    /// Total angular span in radians (TAU = full circle).
+    #[serde(default = "_default_arc_span")]
+    pub arc_span: f32,
+    /// Angle of the first segment, CCW from +X axis.
+    #[serde(default = "_default_arc_offset")]
+    pub arc_offset: f32,
+    /// When true, segments touch with no gap.
+    #[serde(default)]
+    pub overlap: bool,
 }
 impl Default for WheelData {
     fn default() -> Self {
@@ -2005,6 +1999,11 @@ impl Default for WheelData {
             bg_opacity: 1.0,
             hub_color: String::new(),
             hub_opacity: 1.0,
+            deadzone: _default_deadzone(),
+            gap: _default_gap(),
+            arc_span: _default_arc_span(),
+            arc_offset: _default_arc_offset(),
+            overlap: false,
         }
     }
 }
@@ -2016,18 +2015,6 @@ impl WheelData {
                 .map(|i| WheelSlotData::named(format!("Slot {}", i + 1)))
                 .collect(),
             ..Default::default()
-        }
-    }
-    pub fn to_wheel_menu(&self) -> WheelMenu {
-        WheelMenu {
-            slices: self.slots.len().max(1),
-            radius: self.outer_radius.max(40.0),
-            inner_radius: self.inner_radius.max(8.0),
-            deadzone: 0.3,
-            gap: 0.04,
-            arc_span: std::f32::consts::TAU,
-            arc_offset: std::f32::consts::FRAC_PI_6,
-            overlap: false,
         }
     }
 }
@@ -2135,6 +2122,9 @@ pub struct QuickActionConfig {
     /// Whether the HUD trigger button is a hold (release = close) or a toggle.
     #[serde(default)]
     pub hud_open_mode: HudOpenMode,
+    /// Opacity of the full-screen HUD background overlay (0.0 = invisible, 1.0 = opaque).
+    #[serde(default = "_full_opacity")]
+    pub hud_bg_opacity: f32,
     pub sets: Vec<ActionSet>,
 }
 
@@ -2156,6 +2146,7 @@ impl Default for QuickActionConfig {
             cycle_sets: false,
             edit_shortcut: String::new(),
             hud_open_mode: HudOpenMode::Hold,
+            hud_bg_opacity: 1.0,
             sets: vec![
                 ActionSet {
                     name: "Combat".into(),
@@ -2234,10 +2225,28 @@ impl Default for QuickActionConfig {
 #[derive(Component)]
 pub struct WheelHudRoot;
 
-/// Tags `Mesh2d` entities for the Pie-shape segment preview.
-/// Despawned on each HUD rebuild.
-#[derive(Component)]
-pub struct WheelMeshPreview;
+/// Params uploaded to the wedge fragment shader.
+#[derive(Clone, ShaderType)]
+pub struct WedgeParams {
+    pub color: Vec4,
+    pub inner_r: f32,
+    pub outer_r: f32,
+    pub angle_start: f32,
+    pub angle_end: f32,
+}
+
+/// UI material that renders a single annular sector (pie slice).
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub struct WedgeMaterial {
+    #[uniform(0)]
+    pub params: WedgeParams,
+}
+
+impl UiMaterial for WedgeMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/wedge.wgsl".into()
+    }
+}
 
 /// Shared state read by both the HUD renderer and the editor sidebar.
 #[derive(Resource)]
@@ -2372,7 +2381,7 @@ fn hud_canvas_root() -> impl bevy::scene::prelude::Scene {
             justify_content: JustifyContent::Center,
             align_items: AlignItems::Center,
         }
-        BackgroundColor({HUD_BG})
+        BackgroundColor({HUD_BG.with_alpha(1.0)})
     }
 }
 
@@ -2382,12 +2391,9 @@ pub fn build_hud_canvas(
     commands: &mut Commands,
     cfg: &QuickActionConfig,
     hud: &WheelHudState,
-    _win_w: f32,
-    _win_h: f32,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<ColorMaterial>,
     asset_server: &AssetServer,
     icon_set: GamepadIconSet,
+    wedge_materials: &mut Assets<WedgeMaterial>,
 ) {
     let root = commands
         .spawn_scene(hud_canvas_root())
@@ -2399,6 +2405,11 @@ pub fn build_hud_canvas(
         commands.entity(root).insert(BackgroundColor(Color::NONE));
         return;
     }
+
+    // Apply the user-configured HUD background opacity.
+    commands
+        .entity(root)
+        .insert(BackgroundColor(HUD_BG.with_alpha(cfg.hud_bg_opacity)));
 
     // Edit toggle button — visible only while the wheel is open, hidden when
     // the editor sidebar is already showing.
@@ -2459,12 +2470,6 @@ pub fn build_hud_canvas(
         return;
     }
 
-    // Offset wheel rightward when the sidebar is open so it stays centred in
-    // the exposed area. (Pie-shape mesh uses world-space coordinates.)
-    let sidebar_w = if hud.editor_open { 260.0_f32 } else { 0.0_f32 };
-    let wheel_cx = sidebar_w / 2.0;
-    let wheel_cy = 0.0_f32;
-
     if let Some(set) = cfg.sets.get(hud.active_set) {
         // Background image for this set, if configured.
         if !set.bg_image.is_empty() {
@@ -2519,10 +2524,7 @@ pub fn build_hud_canvas(
                         ei,
                         None,
                         hud.highlighted,
-                        wheel_cx,
-                        wheel_cy,
-                        meshes,
-                        materials,
+                        wedge_materials,
                     );
                     rendered = true;
                 }
@@ -2536,10 +2538,7 @@ pub fn build_hud_canvas(
                             ei,
                             Some(0),
                             hud.highlighted,
-                            wheel_cx,
-                            wheel_cy,
-                            meshes,
-                            materials,
+                            wedge_materials,
                         );
                         rendered = true;
                     }
@@ -2569,12 +2568,9 @@ pub fn build_centered_wheel_hud(
     entry: usize,
     w_idx: Option<usize>,
     highlighted: Option<(usize, usize, Option<usize>, usize)>,
-    wheel_cx: f32,
-    wheel_cy: f32,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<ColorMaterial>,
+    wedge_materials: &mut Assets<WedgeMaterial>,
 ) {
-    let menu = wheel.to_wheel_menu();
+    let n_slices = wheel.slots.len().max(1);
     let hub = hud_child(commands, parent, wheel_hub());
 
     let is_pie = wheel.segment_shape == SegmentShape::Pie;
@@ -2584,7 +2580,7 @@ pub fn build_centered_wheel_hud(
         } else {
             parse_hex_color(&wheel.bg_color, wheel.bg_opacity)
         };
-        hud_child(commands, hub, wheel_bg_disc(menu.radius, bg_col));
+        hud_child(commands, hub, wheel_bg_disc(wheel.outer_radius, bg_col));
     }
     let outer_col = if wheel.outer_border.is_empty() {
         Color::srgba(0.75, 0.58, 0.15, 0.40)
@@ -2599,12 +2595,12 @@ pub fn build_centered_wheel_hud(
     hud_child(
         commands,
         hub,
-        wheel_outer_ring(menu.radius, outer_col, outer_bw),
+        wheel_outer_ring(wheel.outer_radius, outer_col, outer_bw),
     );
 
-    let slice_angle = std::f32::consts::TAU / menu.slices.max(1) as f32;
-    let base_pw = (2.0 * menu.radius * (slice_angle / 2.0).sin() * 0.72).max(48.0);
-    let base_ph = ((menu.radius - menu.inner_radius) * 0.85).max(40.0);
+    let slice_angle = std::f32::consts::TAU / n_slices as f32;
+    let base_pw = (2.0 * wheel.outer_radius * (slice_angle / 2.0).sin() * 0.72).max(48.0);
+    let base_ph = ((wheel.outer_radius - wheel.inner_radius) * 0.85).max(40.0);
     let panel_w = (base_pw * wheel.segment_scale).max(32.0);
     let panel_h = (base_ph * wheel.segment_scale).max(24.0);
     let min_dim = panel_w.min(panel_h);
@@ -2614,7 +2610,7 @@ pub fn build_centered_wheel_hud(
     let label_sz = (panel_h * 0.18).clamp(9.0, 13.0);
 
     for (i, slot) in wheel.slots.iter().enumerate() {
-        if i >= menu.slices {
+        if i >= n_slices {
             break;
         }
         let is_sel = highlighted
@@ -2623,16 +2619,32 @@ pub fn build_centered_wheel_hud(
         let seg_color = if is_sel { highlight_col } else { slice_bg };
 
         if is_pie {
-            let (a0, a1) = slice_angles(&menu, i);
-            let mesh = meshes.add(crate::mesh::wedge(menu.inner_radius, menu.radius, a0, a1));
-            let mat = materials.add(ColorMaterial::from_color(seg_color));
-            commands.spawn((
-                Mesh2d(mesh),
-                MeshMaterial2d(mat),
-                Transform::from_xyz(wheel_cx, wheel_cy, 0.5),
-                WheelMeshPreview,
-            ));
-            let ctr = slice_center(&menu, i);
+            let (a0, a1) = slice_angles(wheel, i);
+            let mat_handle = wedge_materials.add(WedgeMaterial {
+                params: WedgeParams {
+                    color: seg_color.to_linear().to_vec4(),
+                    inner_r: wheel.inner_radius,
+                    outer_r: wheel.outer_radius,
+                    angle_start: a0,
+                    angle_end: a1,
+                },
+            });
+            let dia = wheel.outer_radius * 2.0;
+            let wedge_e = commands
+                .spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(-wheel.outer_radius),
+                        top: Val::Px(-wheel.outer_radius),
+                        width: Val::Px(dia),
+                        height: Val::Px(dia),
+                        ..default()
+                    },
+                    MaterialNode(mat_handle),
+                ))
+                .id();
+            commands.entity(hub).add_child(wedge_e);
+            let ctr = slice_center(wheel, i);
             let panel_e = commands
                 .spawn_scene(bsn! {
                     Node {
@@ -2682,7 +2694,7 @@ pub fn build_centered_wheel_hud(
                 },
                 SegmentShape::Pie => unreachable!(),
             };
-            let ctr = slice_center(&menu, i);
+            let ctr = slice_center(wheel, i);
             let panel_e = commands
                 .spawn_scene(bsn! {
                     Node {
@@ -2724,7 +2736,7 @@ pub fn build_centered_wheel_hud(
     }
 
     // Centre hub ring.
-    let disc_r = (menu.inner_radius - 4.0).max(8.0);
+    let disc_r = (wheel.inner_radius - 4.0).max(8.0);
     let ring_col = if wheel.inner_border.is_empty() {
         Color::srgb(0.82, 0.64, 0.16)
     } else {
@@ -3117,7 +3129,7 @@ fn hud_stick_nav(
     let new_highlight = if stick.length() < DEADZONE {
         None
     } else {
-        // Same angle mapping as WheelData::to_wheel_menu() arc_offset.
+        // Same angle mapping as WheelData::arc_offset default (FRAC_PI_6).
         let a = stick.y.atan2(stick.x);
         let rel = (a - std::f32::consts::FRAC_PI_6).rem_euclid(std::f32::consts::TAU);
         let idx = ((rel / std::f32::consts::TAU) * n_slots as f32).floor() as usize;
@@ -3145,11 +3157,8 @@ fn rebuild_hud(
     cfg: Res<QuickActionConfig>,
     asset_server: Res<AssetServer>,
     icon_set: Res<GamepadIconSet>,
-    windows: Query<&Window>,
     old_hud: Query<Entity, With<WheelHudRoot>>,
-    old_meshes: Query<Entity, With<WheelMeshPreview>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut wedge_materials: ResMut<Assets<WedgeMaterial>>,
 ) {
     if !hud.dirty {
         return;
@@ -3159,27 +3168,18 @@ fn rebuild_hud(
     for e in &old_hud {
         commands.entity(e).despawn();
     }
-    for e in &old_meshes {
-        commands.entity(e).despawn();
-    }
 
     if !cfg.sets.is_empty() && hud.active_set >= cfg.sets.len() {
         hud.active_set = cfg.sets.len() - 1;
     }
 
-    let win = windows.iter().next();
-    let win_w = win.map(|w| w.width()).unwrap_or(1280.0);
-    let win_h = win.map(|w| w.height()).unwrap_or(768.0);
     build_hud_canvas(
         &mut commands,
         &cfg,
         &hud,
-        win_w,
-        win_h,
-        &mut meshes,
-        &mut materials,
         &*asset_server,
         *icon_set,
+        &mut wedge_materials,
     );
 }
 

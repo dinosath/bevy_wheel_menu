@@ -12,7 +12,7 @@ use bevy_wheel_menu::*;
 // Diablo-style color theme
 mod diablo_theme {
     use bevy::prelude::*;
-    
+
     pub const BACKGROUND: Color = Color::srgba(0.05, 0.02, 0.02, 0.95);
     pub const SLICE_BASE: Color = Color::srgba(0.12, 0.08, 0.06, 0.9);
     pub const SLICE_HOVER: Color = Color::srgba(0.6, 0.15, 0.05, 0.95);
@@ -88,12 +88,15 @@ fn main() {
         .add_plugins(WheelMenuPlugin)
         .init_resource::<WheelConfig>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (
-            adjust_wheel_config,
-            on_hover_changed,
-            on_select,
-            on_low_count,
-        ))
+        .add_systems(
+            Update,
+            (
+                adjust_wheel_config,
+                on_hover_changed,
+                on_select,
+                on_low_count,
+            ),
+        )
         .run();
 }
 
@@ -103,13 +106,17 @@ fn setup(mut commands: Commands, config: Res<WheelConfig>) {
 }
 
 fn spawn_diablo_wheel(commands: &mut Commands, config: &WheelConfig) {
-    let menu = WheelMenu {
-        slices: config.slices,
-        radius: 180.0,
+    // Build a WheelData with one placeholder slot per slice. The actual
+    // icons/labels come from the SKILLS array and are added as child entities.
+    let menu = WheelData {
+        slots: (0..config.slices)
+            .map(|_| WheelSlotData::default())
+            .collect(),
+        outer_radius: 180.0,
         inner_radius: 60.0,
         deadzone: 0.25,
         gap: config.gap,
-        ..default()
+        ..Default::default()
     };
 
     // Full-screen UI overlay (from the library, authored with `bsn!`) that also
@@ -121,7 +128,11 @@ fn spawn_diablo_wheel(commands: &mut Commands, config: &WheelConfig) {
             WheelRoot,
             menu.clone(),
             WheelState::default(),
-            WheelMenuConfig { casting_mode: CastingMode::ReleaseToUse, auto_snap: true, ..default() },
+            WheelMenuConfig {
+                casting_mode: CastingMode::ReleaseToUse,
+                auto_snap: true,
+                ..default()
+            },
         ))
         .id();
 
@@ -132,13 +143,18 @@ fn spawn_diablo_wheel(commands: &mut Commands, config: &WheelConfig) {
 
     // Center decoration disc.
     let disc = (menu.inner_radius - 5.0).max(1.0);
-    let center = commands.spawn_scene(wheel_center_disc(disc, diablo_theme::BACKGROUND)).id();
+    let center = commands
+        .spawn_scene(wheel_center_disc(disc, diablo_theme::BACKGROUND))
+        .id();
     commands.entity(hub).add_child(center);
 
     // One rounded UI panel per slice, placed radially around the hub.
     let size = 84.0_f32;
-    for i in 0..menu.slices {
-        let skill = SKILLS.get(i % SKILLS.len()).copied().unwrap_or(("?", "Unknown"));
+    for i in 0..menu.slots.len() {
+        let skill = SKILLS
+            .get(i % SKILLS.len())
+            .copied()
+            .unwrap_or(("?", "Unknown"));
         let icon = skill.0.to_string();
         let label = skill.1.to_string();
 
@@ -149,7 +165,12 @@ fn spawn_diablo_wheel(commands: &mut Commands, config: &WheelConfig) {
             .insert((
                 SliceVisual { index: i },
                 WheelSlice { index: i },
-                WheelSliceCount { current: 10, max: 10, low_threshold: 3, ..default() },
+                WheelSliceCount {
+                    current: 10,
+                    max: 10,
+                    low_threshold: 3,
+                    ..default()
+                },
             ))
             .id();
 
@@ -162,7 +183,9 @@ fn spawn_diablo_wheel(commands: &mut Commands, config: &WheelConfig) {
             .insert(SliceLabel { index: i })
             .id();
 
-        commands.entity(slice).add_children(&[icon_entity, label_entity]);
+        commands
+            .entity(slice)
+            .add_children(&[icon_entity, label_entity]);
         commands.entity(hub).add_child(slice);
     }
 }
@@ -181,7 +204,7 @@ fn adjust_wheel_config(
 ) {
     let mut slice_delta: i32 = 0;
     let mut gap_delta: f32 = 0.0;
-    
+
     for gamepad in &gamepads {
         if gamepad.just_pressed(GamepadButton::DPadUp) {
             slice_delta += 1;
@@ -196,17 +219,17 @@ fn adjust_wheel_config(
             gap_delta -= 0.02;
         }
     }
-    
+
     let new_slices = (config.slices as i32 + slice_delta).max(2) as usize;
     let new_gap = (config.gap + gap_delta).clamp(0.0, 0.2);
-    
+
     if new_slices != config.slices || (new_gap - config.gap).abs() > 0.001 {
         config.slices = new_slices;
         config.gap = new_gap;
-        
+
         despawn_wheel(&mut commands, &wheel_query);
         spawn_diablo_wheel(&mut commands, &config);
-        
+
         info!("Wheel: {} slices, gap: {:.2}", config.slices, config.gap);
     }
 }
@@ -252,7 +275,9 @@ fn on_select(
     mut slice_counts: Query<(&WheelSlice, &mut WheelSliceCount)>,
 ) {
     for event in select_events.read() {
-        let skill = SKILLS.get(event.index % SKILLS.len()).unwrap_or(&("?", "Unknown"));
+        let skill = SKILLS
+            .get(event.index % SKILLS.len())
+            .unwrap_or(&("?", "Unknown"));
         info!("Selected skill: {} ({})", skill.1, skill.0);
         // Decrement the use count; the library will emit WheelMenuLowCount
         // when it crosses the threshold.
@@ -274,7 +299,10 @@ fn on_low_count(
         for (visual, mut bg) in &mut slice_visuals {
             if visual.index == event.index {
                 bg.0 = Color::srgba(0.55, 0.22, 0.02, 0.95);
-                info!("Skill {} is running low ({} uses left)", event.index, event.current);
+                info!(
+                    "Skill {} is running low ({} uses left)",
+                    event.index, event.current
+                );
             }
         }
     }

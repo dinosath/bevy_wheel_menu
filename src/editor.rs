@@ -295,6 +295,10 @@ pub enum EditorAction {
     /// Begin capturing the global edit-sidebar shortcut.
     CaptureEditShortcut,
     CycleHudOpenMode,
+    /// Nudge `QuickActionConfig::hud_bg_opacity` by `delta`.
+    HudBgOpacityDelta {
+        delta: f32,
+    },
     // ── per-set config ──────────────────────────────────────────────────────────
     EditSetBgImage {
         set: usize,
@@ -1487,6 +1491,16 @@ fn build_root_sidebar(
         EditorAction::CycleHudOpenMode,
     );
 
+    // HUD background opacity
+    spawn_stepper_field(
+        commands,
+        card,
+        "HUD bg opacity",
+        &format!("{:.0}%", cfg.hud_bg_opacity * 100.0),
+        EditorAction::HudBgOpacityDelta { delta: -0.05 },
+        EditorAction::HudBgOpacityDelta { delta: 0.05 },
+    );
+
     // ── footer ─────────────────────────────────────────────────────────────────────
     build_footer(commands, root, &ui.config_path);
 }
@@ -2337,6 +2351,9 @@ fn apply_action(
         }
         EditorAction::CycleHudOpenMode => {
             cfg.hud_open_mode = cfg.hud_open_mode.next();
+        }
+        EditorAction::HudBgOpacityDelta { delta } => {
+            cfg.hud_bg_opacity = (cfg.hud_bg_opacity + delta).clamp(0.0, 1.0);
         }
         // ── per-set config ──────────────────────────────────────────────────────────
         EditorAction::EditSetBgImage { set } => {
