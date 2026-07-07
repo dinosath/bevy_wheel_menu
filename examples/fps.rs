@@ -10,7 +10,7 @@
 //!   ⚙ Edit button      — open in-app config editor (while HUD is open)
 
 use bevy::prelude::*;
-use quick_action_hud::{
+use bevy_quick_action_hud::{
     HudOpenMode, HudSegmentSelected, QuickActionConfig, QuickActionHudPlugin, WheelHudState,
 };
 
@@ -343,7 +343,7 @@ fn handle_wheel_toggle(
             }
             if just_l2 {
                 if hud.open && !hud.editor_open {
-                    // Close (don't close while editor is open).
+                    // Don't close while editor is open.
                     hud.highlighted = None;
                     hud.open = false;
                     hud.dirty = true;

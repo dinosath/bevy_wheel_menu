@@ -18,11 +18,13 @@ use bevy::ecs::message::MessageReader;
 use bevy::feathers::controls::{
     ButtonVariant, FeathersButton, FeathersCheckbox, FeathersToolButton,
 };
+use bevy::feathers::focus::FocusIndicator as FeathersFocusIndicator;
 use bevy::feathers::theme::ThemedText;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::prelude::*;
 use bevy::ui::Checked;
+use bevy::ui::{OverflowAxis, UiGlobalTransform};
 use bevy::ui_widgets::{Activate, ControlOrientation, Scrollbar, ScrollbarThumb, ValueChange};
 
 // ─── selection & edit-focus ──────────────────────────────────────────────────────
@@ -100,6 +102,13 @@ pub struct EditorUiState {
     /// Persisted vertical scroll offset for the wheel editor panel.
     pub wheel_scroll_y: f32,
     // active_set and editor_open moved to WheelHudState in lib.rs
+    /// Index of the currently gamepad-focused item in the sidebar.
+    pub navfocus: usize,
+    /// Total number of focusable items in the current sidebar view.
+    pub nav_count: usize,
+    /// Set to true whenever the gamepad focus moves so that the PostUpdate
+    /// scroll system can bring the focused item into view.
+    pub scroll_to_focus: bool,
 }
 impl Default for EditorUiState {
     fn default() -> Self {
@@ -109,6 +118,9 @@ impl Default for EditorUiState {
             editing: EditFocus::None,
             config_path: crate::CONFIG_FILE.into(),
             wheel_scroll_y: 0.0,
+            navfocus: 0,
+            nav_count: 0,
+            scroll_to_focus: false,
         }
     }
 }
@@ -138,6 +150,10 @@ pub struct EditorButton {
 pub struct EditorToggle {
     pub action: EditorAction,
 }
+
+/// Marks the currently gamepad-focused editor button.
+#[derive(Component)]
+pub struct FocusedEditorItem;
 
 // ─── editor actions ───────────────────────────────────────────────────────────────
 
@@ -443,9 +459,12 @@ fn on_editor_activate(
     mut hud: ResMut<WheelHudState>,
 ) {
     if let Ok(btn) = btns.get(trigger.event_target()) {
-        apply_action(&btn.action.clone(), &mut cfg, &mut ui, &mut hud);
+        let action = btn.action.clone();
+        apply_action(&action, &mut cfg, &mut ui, &mut hud);
         ui.dirty = true;
-        hud.dirty = true;
+        if !is_nav_only_action(&action) {
+            hud.dirty = true;
+        }
     }
 }
 
@@ -463,6 +482,155 @@ fn on_editor_value_change_bool(
     }
 }
 
+/// Gamepad D-pad + button navigation for the editor sidebar.
+fn editor_gamepad_nav(
+    gamepads: Query<&Gamepad>,
+    mut ui: ResMut<EditorUiState>,
+    mut hud: ResMut<WheelHudState>,
+    mut cfg: ResMut<QuickActionConfig>,
+    focused_btn_q: Query<&EditorButton, With<FocusedEditorItem>>,
+    focused_toggle_q: Query<&EditorToggle, With<FocusedEditorItem>>,
+) {
+    if !hud.editor_open || ui.editing != EditFocus::None {
+        return;
+    }
+    let Some(gamepad) = gamepads.iter().next() else {
+        return;
+    };
+    if gamepad.just_pressed(GamepadButton::DPadDown) {
+        ui.navfocus = (ui.navfocus + 1).min(ui.nav_count.saturating_sub(1));
+        ui.dirty = true;
+    } else if gamepad.just_pressed(GamepadButton::DPadUp) {
+        ui.navfocus = ui.navfocus.saturating_sub(1);
+        ui.dirty = true;
+    } else if gamepad.just_pressed(GamepadButton::South) {
+        // Resolve the action from whichever focusable type is currently highlighted.
+        let action = if let Ok(btn) = focused_btn_q.single() {
+            Some(btn.action.clone())
+        } else if let Ok(toggle) = focused_toggle_q.single() {
+            Some(toggle.action.clone())
+        } else {
+            None
+        };
+        if let Some(action) = action {
+            let sel_before = ui.selection;
+            apply_action(&action, &mut cfg, &mut ui, &mut hud);
+            ui.dirty = true;
+            if !is_nav_only_action(&action) {
+                hud.dirty = true;
+            }
+            // Only jump back to the top when we navigated into a new panel.
+            // For in-place edits (toggle, stepper, cycle) keep the cursor where it is.
+            if ui.selection != sel_before {
+                ui.navfocus = 0;
+            }
+        }
+    } else if gamepad.just_pressed(GamepadButton::East) {
+        let sel_before = ui.selection;
+        apply_action(&EditorAction::NavBack, &mut cfg, &mut ui, &mut hud);
+        ui.dirty = true;
+        hud.dirty = true;
+        if ui.selection != sel_before {
+            ui.navfocus = 0;
+        }
+    }
+}
+
+/// Runs in PostUpdate after layout, auto-scrolling the editor sidebar so the
+/// gamepad-focused item is always visible.
+///
+/// Works by walking up the parent chain from the focused entity to find the
+/// nearest `overflow: scroll_y` container, then computing the scroll offset
+/// needed to centre (or just reveal) the focused item inside the viewport.
+fn scroll_editor_to_focus(
+    mut ui: ResMut<EditorUiState>,
+    mut commands: Commands,
+    focused_q: Query<(Entity, &ComputedNode, &UiGlobalTransform), With<FocusedEditorItem>>,
+    node_q: Query<(&Node, &ComputedNode, &UiGlobalTransform)>,
+    scroll_q: Query<Option<&ScrollPosition>>,
+    parent_q: Query<&ChildOf>,
+) {
+    if !ui.scroll_to_focus {
+        return;
+    }
+    ui.scroll_to_focus = false;
+
+    let Ok((focus_entity, focus_cn, focus_tf)) = focused_q.single() else {
+        return;
+    };
+    // Skip if layout hasn't run yet (sizes are zero on the first frame after spawn).
+    if focus_cn.size().y == 0.0 {
+        ui.scroll_to_focus = true; // retry next frame
+        return;
+    }
+
+    // Walk up the hierarchy to find the nearest scrollable ancestor.
+    let mut current = focus_entity;
+    let scroll_entity = loop {
+        let Ok(child_of) = parent_q.get(current) else {
+            break None;
+        };
+        let parent = child_of.parent();
+        if let Ok((node, _, _)) = node_q.get(parent) {
+            if node.overflow.y == OverflowAxis::Scroll {
+                break Some(parent);
+            }
+        }
+        current = parent;
+    };
+    let Some(scroll_entity) = scroll_entity else {
+        return;
+    };
+
+    let Ok((_, scroll_cn, scroll_tf)) = node_q.get(scroll_entity) else {
+        return;
+    };
+    let viewport_h = scroll_cn.size().y;
+    if viewport_h == 0.0 {
+        return;
+    }
+
+    let scale = scroll_cn.inverse_scale_factor;
+    if scale == 0.0 {
+        return;
+    }
+
+    // UiGlobalTransform stores the *centre* of each node in physical pixels.
+    let focus_center_y = focus_tf.translation.y;
+    let scroll_center_y = scroll_tf.translation.y;
+
+    let item_h = focus_cn.size().y;
+    let item_top_phys = focus_center_y - item_h / 2.0;
+    let scroll_top_phys = scroll_center_y - viewport_h / 2.0;
+
+    // Current scroll offset (logical → physical).
+    let current_scroll_logical = scroll_q
+        .get(scroll_entity)
+        .ok()
+        .flatten()
+        .map(|sp| sp.0.y)
+        .unwrap_or(0.0);
+    let current_scroll_phys = current_scroll_logical / scale;
+
+    // Item's content-space top (distance from the very top of the scrollable content).
+    let item_content_top = (item_top_phys - scroll_top_phys) + current_scroll_phys;
+
+    // If the item is already fully in view, do nothing.
+    let item_top_in_viewport = item_content_top - current_scroll_phys;
+    let item_bottom_in_viewport = item_top_in_viewport + item_h;
+    if item_top_in_viewport >= 0.0 && item_bottom_in_viewport <= viewport_h {
+        return;
+    }
+
+    // Centre the item in the viewport, clamped to valid range.
+    let target_scroll_phys = (item_content_top - (viewport_h - item_h) / 2.0).max(0.0);
+    let target_scroll_logical = target_scroll_phys * scale;
+
+    commands
+        .entity(scroll_entity)
+        .insert(ScrollPosition(Vec2::new(0.0, target_scroll_logical)));
+}
+
 /// Registers all editor UI resources and systems into `app`.
 /// Called by [`QuickActionHudPlugin`] when `editor: true`.
 pub(crate) fn register_editor_systems(app: &mut App) {
@@ -472,6 +640,7 @@ pub(crate) fn register_editor_systems(app: &mut App) {
         .add_systems(
             Update,
             (
+                editor_gamepad_nav,
                 process_hud_buttons,
                 editor_capture_key,
                 editor_capture_gamepad,
@@ -483,6 +652,13 @@ pub(crate) fn register_editor_systems(app: &mut App) {
                 rebuild_editor,
             )
                 .chain(),
+        )
+        .add_systems(
+            PostUpdate,
+            (
+                fix_plain_button_initial_bg,
+                scroll_editor_to_focus.after(bevy::ui::UiSystems::Layout),
+            ),
         );
 }
 
@@ -517,6 +693,7 @@ const ROW_SEL: Color = Color::srgba(0.38, 0.62, 0.95, 0.16);
 const ROW_HOVER: Color = Color::srgba(1.0, 1.0, 1.0, 0.05);
 const PANEL_CARD: Color = Color::srgb(0.08, 0.10, 0.15);
 const CTRL_BG: Color = Color::srgb(0.11, 0.14, 0.19);
+const GAMEPAD_FOCUS_OUTLINE: Color = Color::srgba(0.50, 0.70, 0.98, 0.90);
 
 // ─── primitive bsn! helpers ──────────────────────────────────────────────────────
 
@@ -706,7 +883,9 @@ fn cil_icon(
     tint: Color,
     icons: &Icons<'_>,
 ) {
-    let handle = icons.srv.load::<Image>(format!("icons/editor/{name}.png"));
+    let handle = icons.srv.load::<Image>(format!(
+        "embedded://bevy_quick_action_hud/embedded/icons/editor/{name}.png"
+    ));
     let e = commands
         .spawn((
             Node {
@@ -803,6 +982,7 @@ fn spawn_entry_row(
     badge: Badge,
     del: Option<EditorAction>,
     icons: &Icons<'_>,
+    focusables: &mut Vec<Entity>,
 ) {
     let bg = if selected { ROW_SEL } else { Color::NONE };
     // Outer wrapper: [select row (flex-grow)] [delete button]
@@ -819,6 +999,7 @@ fn spawn_entry_row(
         },
     );
     let row = clickable(commands, outer, row_button_grow(bg), select_action, bg);
+    focusables.push(row);
     let left = child(commands, row, hcluster());
     if icon.ends_with(".png") {
         let handle = icons.srv.load::<Image>(icon.to_string());
@@ -854,6 +1035,7 @@ fn spawn_entry_row(
     if let Some(da) = del {
         let dx = clickable(commands, outer, del_btn(), da, Color::NONE);
         cil_icon(commands, dx, "cil-trash", 11., DIMMER, icons);
+        focusables.push(dx);
     }
 }
 
@@ -871,7 +1053,7 @@ struct Icons<'a> {
 /// - Keyboard key → text badge (existing behaviour).
 fn spawn_input_badge(commands: &mut Commands, parent: Entity, key: &str, icons: &Icons<'_>) {
     if let Some(label) = key.strip_prefix("GP:") {
-        if let Some(path) = icons.set.icon_path(label) {
+        if let Some(path) = icons.set.embedded_icon_path(label) {
             let handle = icons.srv.load::<Image>(path);
             let e = commands
                 .spawn((
@@ -906,12 +1088,13 @@ fn spawn_key_capture_field(
     raw_key: &str,
     focused: bool,
     icons: &Icons<'_>,
-) {
+    focusables: &mut Vec<Entity>,
+) -> Entity {
     let row = spawn_field(commands, parent, label);
     let b = clickable(commands, row, ctrl_box(accent), action, Color::NONE);
     if !focused && !raw_key.is_empty() {
         if let Some(btn_label) = raw_key.strip_prefix("GP:") {
-            if let Some(path) = icons.set.icon_path(btn_label) {
+            if let Some(path) = icons.set.embedded_icon_path(btn_label) {
                 let handle = icons.srv.load::<Image>(path);
                 let e = commands
                     .spawn((
@@ -954,10 +1137,57 @@ fn spawn_key_capture_field(
             Color::NONE,
         );
         cil_icon(commands, clear_btn, "cil-x", 10., HUD_DIM, icons);
+        focusables.push(clear_btn);
     }
+    b
 }
 
 // ─── rebuild ─────────────────────────────────────────────────────────────────────
+
+/// Returns `true` for editor actions that only change `ui.selection` / `ui.editing`
+/// and therefore do **not** require a HUD canvas rebuild (`hud.dirty = true`).
+/// All other actions may mutate `cfg` or `hud` state that is rendered on the canvas.
+fn is_nav_only_action(action: &EditorAction) -> bool {
+    matches!(
+        action,
+        EditorAction::EditSetName { .. }
+            | EditorAction::EditName { .. }
+            | EditorAction::EditWheelName
+            | EditorAction::EditWheelSetName { .. }
+            | EditorAction::EditSlotName { .. }
+            | EditorAction::EditSlotIcon { .. }
+            | EditorAction::EditSlotItemName { .. }
+            | EditorAction::EditSlotItemIcon { .. }
+            | EditorAction::EditSetBgImage { .. }
+            | EditorAction::CaptureKey { .. }
+            | EditorAction::CaptureNextSetKey
+            | EditorAction::CapturePrevSetKey
+            | EditorAction::CaptureEditShortcut
+            | EditorAction::CaptureWheelSetSwitchKey { .. }
+            | EditorAction::CaptureSlotInput { .. }
+            | EditorAction::CaptureNextWheelKey { .. }
+            | EditorAction::CapturePrevWheelKey { .. }
+            | EditorAction::Save
+    )
+}
+
+/// Fixes a one-frame flash caused by feathers initialising every `FeathersButton` with
+/// `ThemeBackgroundColor(BUTTON_BG)` (opaque gray) regardless of variant.  The `update_button_styles`
+/// system in feathers' `PreUpdate` only corrects this in the *next* frame, so Plain buttons
+/// (which should be transparent at rest) flash gray for one rendered frame after a sidebar rebuild.
+///
+/// Running in PostUpdate of the *same* frame as the spawn, before the render, we override
+/// `BackgroundColor` to transparent so the first rendered frame is already correct.
+fn fix_plain_button_initial_bg(
+    q: Query<(Entity, &ButtonVariant), Added<ButtonVariant>>,
+    mut commands: Commands,
+) {
+    for (e, variant) in q.iter() {
+        if *variant == ButtonVariant::Plain {
+            commands.entity(e).insert(BackgroundColor(Color::NONE));
+        }
+    }
+}
 
 fn rebuild_editor(
     mut commands: Commands,
@@ -974,6 +1204,11 @@ fn rebuild_editor(
     }
     ui.dirty = false;
 
+    debug!(
+        "[editor] rebuild_editor — editor_open={} hud_open={} selection={:?} editing={:?}",
+        hud.editor_open, hud.open, ui.selection, ui.editing
+    );
+
     // Persist the current vertical scroll offset so we can restore it after
     // the UI is rebuilt (despawn + respawn resets ScrollPosition to zero).
     if let Ok(sp) = scroll_q.single() {
@@ -985,16 +1220,47 @@ fn rebuild_editor(
     }
 
     if hud.editor_open {
+        debug!("[editor] building sidebar (focusables will be counted)");
         let icons = Icons {
             srv: &*asset_server,
             set: *icon_set,
         };
-        if let Some(scroll_area) = build_sidebar(&mut commands, &cfg, &ui, &hud, &icons) {
+        let (scroll_area, focusables) = build_sidebar(&mut commands, &cfg, &ui, &hud, &icons);
+
+        // Update nav focus state.
+        let count = focusables.len();
+        ui.nav_count = count;
+        debug!(
+            "[editor] sidebar built — focusables={} navfocus={}",
+            count, ui.navfocus
+        );
+        if count > 0 && ui.navfocus >= count {
+            ui.navfocus = count - 1;
+        }
+        if let Some(&e) = focusables.get(ui.navfocus) {
+            // Use an Outline for the gamepad focus ring instead of BackgroundColor.
+            // FeathersButton manages BackgroundColor via ThemeBackgroundColor, and
+            // manage_focus_indicators (PostUpdate) removes Outline from all FocusIndicator
+            // entities that aren't keyboard-focused.  By removing FocusIndicator we opt out
+            // of that system and keep our gamepad outline intact until the sidebar rebuilds.
+            commands
+                .entity(e)
+                .insert(FocusedEditorItem)
+                .remove::<FeathersFocusIndicator>()
+                .insert(Outline {
+                    width: Val::Px(2.),
+                    offset: Val::Px(0.),
+                    color: GAMEPAD_FOCUS_OUTLINE,
+                });
+            ui.scroll_to_focus = true;
+        }
+
+        if let Some(sa) = scroll_area {
             // Restore saved offset. The insert command runs after the spawn
             // commands, so the entity is guaranteed to exist by then.
             if ui.wheel_scroll_y > 0.0 {
                 commands
-                    .entity(scroll_area)
+                    .entity(sa)
                     .insert(ScrollPosition(Vec2::new(0.0, ui.wheel_scroll_y)));
             }
         } else {
@@ -1002,6 +1268,9 @@ fn rebuild_editor(
             // editor opens at the top.
             ui.wheel_scroll_y = 0.0;
         }
+    } else {
+        debug!("[editor] editor_open=false — no sidebar spawned");
+        ui.nav_count = 0;
     }
 }
 
@@ -1013,28 +1282,29 @@ fn build_sidebar(
     ui: &EditorUiState,
     hud: &WheelHudState,
     icons: &Icons<'_>,
-) -> Option<Entity> {
+) -> (Option<Entity>, Vec<Entity>) {
     let root = commands.spawn_scene(sidebar()).insert(EditorRoot).id();
+    let mut focusables: Vec<Entity> = Vec::new();
 
     match ui.selection {
-        // Root: ActionSets list ───────────────────────────────────────────
+        // Root: ActionSets list ───────────────────────────────────────────────────
         Selection::None => {
-            build_root_sidebar(commands, root, cfg, ui, icons);
-            None
+            build_root_sidebar(commands, root, cfg, ui, icons, &mut focusables);
+            (None, focusables)
         }
 
-        // Set detail: wheels + buttons for one set ──────────────────────────────
+        // Set detail: wheels + buttons for one set ──────────────────────────
         Selection::Set { .. } | Selection::SetSwitch => {
             let si = if let Selection::Set { set } = ui.selection {
                 set
             } else {
                 0
             };
-            build_nav_sidebar(commands, root, cfg, ui, hud, si, icons);
-            None
+            build_nav_sidebar(commands, root, cfg, ui, hud, si, icons, &mut focusables);
+            (None, focusables)
         }
 
-        // Button / quick-action editor ────────────────────────────────────────
+        // Button / quick-action editor ────────────────────────────────────
         Selection::Action { set, entry } => {
             let qa = cfg
                 .sets
@@ -1056,17 +1326,18 @@ fn build_sidebar(
                     &qa.name.clone(),
                     EditorAction::NavBack,
                     icons,
+                    &mut focusables,
                 );
                 let scroll = child(commands, root, tree());
-                spawn_action_editor(commands, scroll, ui, set, entry, qa, icons);
-                build_footer(commands, root, &ui.config_path);
+                spawn_action_editor(commands, scroll, ui, set, entry, qa, icons, &mut focusables);
+                build_footer(commands, root, &ui.config_path, &mut focusables);
             } else {
-                build_nav_sidebar(commands, root, cfg, ui, hud, set, icons);
+                build_nav_sidebar(commands, root, cfg, ui, hud, set, icons, &mut focusables);
             }
-            None
+            (None, focusables)
         }
 
-        // Wheel editor ────────────────────────────────────────────────────────
+        // Wheel editor ────────────────────────────────────────────────
         Selection::Wheel { set, entry, wheel } => {
             let w_ref = cfg
                 .sets
@@ -1100,18 +1371,29 @@ fn build_sidebar(
                     &wname,
                     EditorAction::NavBack,
                     icons,
+                    &mut focusables,
                 );
                 let scroll = scrolled_tree(commands, root);
-                spawn_wheel_editor(commands, scroll, ui, w, set, entry, wheel, icons);
-                build_footer(commands, root, &ui.config_path);
-                Some(scroll)
+                spawn_wheel_editor(
+                    commands,
+                    scroll,
+                    ui,
+                    w,
+                    set,
+                    entry,
+                    wheel,
+                    icons,
+                    &mut focusables,
+                );
+                build_footer(commands, root, &ui.config_path, &mut focusables);
+                (Some(scroll), focusables)
             } else {
-                build_nav_sidebar(commands, root, cfg, ui, hud, set, icons);
-                None
+                build_nav_sidebar(commands, root, cfg, ui, hud, set, icons, &mut focusables);
+                (None, focusables)
             }
         }
 
-        // Wheel-set entry editor ──────────────────────────────────────────────
+        // Wheel-set entry editor ────────────────────────────────────
         Selection::WheelSetEntry { set, entry } => {
             let ws = cfg
                 .sets
@@ -1134,17 +1416,27 @@ fn build_sidebar(
                     &wname,
                     EditorAction::NavBack,
                     icons,
+                    &mut focusables,
                 );
                 let scroll = child(commands, root, tree());
-                spawn_wheelset_entry_editor(commands, scroll, ui, set, entry, ws, icons);
-                build_footer(commands, root, &ui.config_path);
+                spawn_wheelset_entry_editor(
+                    commands,
+                    scroll,
+                    ui,
+                    set,
+                    entry,
+                    ws,
+                    icons,
+                    &mut focusables,
+                );
+                build_footer(commands, root, &ui.config_path, &mut focusables);
             } else {
-                build_nav_sidebar(commands, root, cfg, ui, hud, set, icons);
+                build_nav_sidebar(commands, root, cfg, ui, hud, set, icons, &mut focusables);
             }
-            None
+            (None, focusables)
         }
 
-        // Segment editor ──────────────────────────────────────────────────────
+        // Segment editor ──────────────────────────────────────────────
         Selection::Segment {
             set,
             entry,
@@ -1174,14 +1466,15 @@ fn build_sidebar(
                     &slot_name,
                     EditorAction::NavBack,
                     icons,
+                    &mut focusables,
                 );
                 let scroll = child(commands, root, tree());
-                spawn_segment_editor(commands, scroll, ui, slot, w, icons);
-                build_footer(commands, root, &ui.config_path);
+                spawn_segment_editor(commands, scroll, ui, slot, w, icons, &mut focusables);
+                build_footer(commands, root, &ui.config_path, &mut focusables);
             } else {
-                build_nav_sidebar(commands, root, cfg, ui, hud, set, icons);
+                build_nav_sidebar(commands, root, cfg, ui, hud, set, icons, &mut focusables);
             }
-            None
+            (None, focusables)
         }
     }
 }
@@ -1194,6 +1487,7 @@ fn build_editor_header(
     item_name: &str,
     back_action: EditorAction,
     icons: &Icons<'_>,
+    focusables: &mut Vec<Entity>,
 ) {
     let header = commands
         .spawn_scene(bsn! {
@@ -1226,6 +1520,7 @@ fn build_editor_header(
         Color::NONE,
     );
     cil_icon(commands, back, "cil-chevron-left", 14., DIM, icons);
+    focusables.push(back);
 
     if let Some(pn) = parent_name {
         child(commands, header, text(pn, 11., DIM));
@@ -1243,6 +1538,7 @@ fn build_nav_sidebar(
     _hud: &WheelHudState,
     si: usize,
     icons: &Icons<'_>,
+    focusables: &mut Vec<Entity>,
 ) {
     // Header with breadcrumb: ‹ Action Sets | Set Name
     let set_name = cfg.sets.get(si).map(|s| s.name.as_str()).unwrap_or("—");
@@ -1279,8 +1575,7 @@ fn build_nav_sidebar(
         Color::NONE,
     );
     cil_icon(commands, back, "cil-chevron-left", 14., DIM, icons);
-
-    // Breadcrumb: Action Sets | Set Name
+    focusables.push(back);
     cil_icon(
         commands,
         header,
@@ -1314,8 +1609,7 @@ fn build_nav_sidebar(
         name_btn,
         text(&nd, 11., if nf { AMBER } else { TEXT }),
     );
-
-    // Close button
+    focusables.push(name_btn);
     let close = hud_clickable(
         commands,
         header,
@@ -1341,7 +1635,7 @@ fn build_nav_sidebar(
     if let Some(set) = cfg.sets.get(si) {
         // Per-set opacity control
         let scard = child(commands, scroll, editor_card());
-        spawn_stepper_field(
+        let (op_dec, op_inc) = spawn_stepper_field(
             commands,
             scard,
             "Opacity",
@@ -1356,6 +1650,8 @@ fn build_nav_sidebar(
             },
             icons,
         );
+        focusables.push(op_dec);
+        focusables.push(op_inc);
 
         // ── SET CONFIG ────────────────────────────────────────────────────────────────
         section_label(commands, scroll, "SET CONFIG");
@@ -1370,7 +1666,7 @@ fn build_nav_sidebar(
         } else {
             set.bg_image.clone()
         };
-        spawn_box_field(
+        let bg_btn = spawn_box_field(
             commands,
             cfg_card,
             "BG image",
@@ -1385,9 +1681,10 @@ fn build_nav_sidebar(
             if bg_f { AMBER } else { BADGE_BORDER },
             EditorAction::EditSetBgImage { set: si },
         );
+        focusables.push(bg_btn);
 
         // Background image opacity
-        spawn_stepper_field(
+        let (bg_op_dec, bg_op_inc) = spawn_stepper_field(
             commands,
             cfg_card,
             "BG opacity",
@@ -1402,11 +1699,13 @@ fn build_nav_sidebar(
             },
             icons,
         );
+        focusables.push(bg_op_dec);
+        focusables.push(bg_op_inc);
 
         // Next wheel shortcut
         let nwf = ui.editing == EditFocus::NextWheelKey(si);
         let (nwd, nwc) = key_display(nwf, &set.next_wheel_key);
-        spawn_key_capture_field(
+        let nw_btn = spawn_key_capture_field(
             commands,
             cfg_card,
             "Next wheel",
@@ -1418,12 +1717,14 @@ fn build_nav_sidebar(
             &set.next_wheel_key,
             nwf,
             icons,
+            focusables,
         );
+        focusables.push(nw_btn);
 
         // Prev wheel shortcut
         let pwf = ui.editing == EditFocus::PrevWheelKey(si);
         let (pwd, pwc) = key_display(pwf, &set.prev_wheel_key);
-        spawn_key_capture_field(
+        let pw_btn = spawn_key_capture_field(
             commands,
             cfg_card,
             "Prev wheel",
@@ -1435,7 +1736,9 @@ fn build_nav_sidebar(
             &set.prev_wheel_key,
             pwf,
             icons,
+            focusables,
         );
+        focusables.push(pw_btn);
 
         // Cycle wheels toggle
         spawn_toggle_field(
@@ -1444,16 +1747,17 @@ fn build_nav_sidebar(
             "Cycle wheels",
             set.cycle_wheels,
             EditorAction::ToggleCycleWheels { set: si },
+            focusables,
         );
-        // ────────────────────────────────────────────────────────────────────────────
+        // ───────────────────────────────────────────────────────────────────────────
 
-        build_nav_wheel_section(commands, scroll, ui, set, si, icons);
-        build_nav_button_section(commands, scroll, ui, set, si, icons);
+        build_nav_wheel_section(commands, scroll, ui, set, si, icons, focusables);
+        build_nav_button_section(commands, scroll, ui, set, si, icons, focusables);
     } else {
         child(commands, scroll, text("No entries.", 10., DIMMER));
     }
 
-    build_footer(commands, root, &ui.config_path);
+    build_footer(commands, root, &ui.config_path, focusables);
 }
 
 /// Root sidebar: list of all ActionSets + global config.
@@ -1463,6 +1767,7 @@ fn build_root_sidebar(
     cfg: &QuickActionConfig,
     ui: &EditorUiState,
     icons: &Icons<'_>,
+    focusables: &mut Vec<Entity>,
 ) {
     // ── header ───────────────────────────────────────────────────────────────────────
     let header = commands
@@ -1506,6 +1811,7 @@ fn build_root_sidebar(
         Color::NONE,
     );
     cil_icon(commands, add_btn, "cil-plus", 13., TEAL, icons);
+    focusables.push(add_btn);
     let close = hud_clickable(
         commands,
         btn_row,
@@ -1567,8 +1873,7 @@ fn build_root_sidebar(
         );
         child(commands, name_btn, text(&set.name, 11., TEXT));
         cil_icon(commands, name_btn, "cil-chevron-right", 10., DIMMER, icons);
-
-        // Delete button
+        focusables.push(name_btn);
         let dx = clickable(
             commands,
             row,
@@ -1577,6 +1882,7 @@ fn build_root_sidebar(
             Color::NONE,
         );
         cil_icon(commands, dx, "cil-trash", 11., DIMMER, icons);
+        focusables.push(dx);
     }
 
     // ── config section ───────────────────────────────────────────────────────────────
@@ -1602,7 +1908,7 @@ fn build_root_sidebar(
     // Next set key
     let nf = ui.editing == EditFocus::NextSetKey;
     let (nd, nc) = key_display(nf, &cfg.next_set_key);
-    spawn_key_capture_field(
+    let next_key_btn = spawn_key_capture_field(
         commands,
         card,
         "Next set key",
@@ -1614,12 +1920,14 @@ fn build_root_sidebar(
         &cfg.next_set_key,
         nf,
         icons,
+        focusables,
     );
+    focusables.push(next_key_btn);
 
     // Prev set key
     let pf = ui.editing == EditFocus::PrevSetKey;
     let (pd, pc) = key_display(pf, &cfg.prev_set_key);
-    spawn_key_capture_field(
+    let prev_key_btn = spawn_key_capture_field(
         commands,
         card,
         "Prev set key",
@@ -1631,7 +1939,9 @@ fn build_root_sidebar(
         &cfg.prev_set_key,
         pf,
         icons,
+        focusables,
     );
+    focusables.push(prev_key_btn);
 
     // Show set bar toggle
     spawn_toggle_field(
@@ -1640,6 +1950,7 @@ fn build_root_sidebar(
         "Show set bar",
         cfg.show_set_bar,
         EditorAction::ToggleShowSetBar,
+        focusables,
     );
 
     // Cycle sets toggle
@@ -1649,12 +1960,13 @@ fn build_root_sidebar(
         "Cycle sets",
         cfg.cycle_sets,
         EditorAction::ToggleCycleSets,
+        focusables,
     );
 
     // Edit shortcut
     let ef = ui.editing == EditFocus::EditShortcut;
     let (ed, ec) = key_display(ef, &cfg.edit_shortcut);
-    spawn_key_capture_field(
+    let edit_sc_btn = spawn_key_capture_field(
         commands,
         card,
         "Edit shortcut",
@@ -1666,10 +1978,12 @@ fn build_root_sidebar(
         &cfg.edit_shortcut,
         ef,
         icons,
+        focusables,
     );
+    focusables.push(edit_sc_btn);
 
     // HUD open mode (Hold / Toggle)
-    spawn_box_field(
+    let hud_mode_btn = spawn_box_field(
         commands,
         card,
         "HUD open mode",
@@ -1678,9 +1992,10 @@ fn build_root_sidebar(
         BADGE_BORDER,
         EditorAction::CycleHudOpenMode,
     );
+    focusables.push(hud_mode_btn);
 
     // HUD background opacity
-    spawn_stepper_field(
+    let (hud_op_dec, hud_op_inc) = spawn_stepper_field(
         commands,
         card,
         "HUD bg opacity",
@@ -1689,6 +2004,8 @@ fn build_root_sidebar(
         EditorAction::HudBgOpacityDelta { delta: 0.05 },
         icons,
     );
+    focusables.push(hud_op_dec);
+    focusables.push(hud_op_inc);
 
     // HUD background color
     {
@@ -1698,7 +2015,7 @@ fn build_root_sidebar(
         } else {
             TEXT
         };
-        spawn_box_field(
+        let hud_bg_btn = spawn_box_field(
             commands,
             card,
             "HUD bg color",
@@ -1707,10 +2024,11 @@ fn build_root_sidebar(
             BADGE_BORDER,
             EditorAction::CycleHudBgColor,
         );
+        focusables.push(hud_bg_btn);
     }
 
-    // ── footer ─────────────────────────────────────────────────────────────────────
-    build_footer(commands, root, &ui.config_path);
+    // ── footer ────────────────────────────────────────────────────────────────────────────
+    build_footer(commands, root, &ui.config_path, focusables);
 }
 
 /// "~ WHEEL SET" navigation section.
@@ -1721,6 +2039,7 @@ fn build_nav_wheel_section(
     set: &ActionSet,
     si: usize,
     icons: &Icons<'_>,
+    focusables: &mut Vec<Entity>,
 ) {
     // Section header.
     let sec = child(
@@ -1754,6 +2073,7 @@ fn build_nav_wheel_section(
         Color::NONE,
     );
     cil_icon(commands, add_wheel_btn, "cil-plus", 12., BLUE, icons);
+    focusables.push(add_wheel_btn);
 
     let body = child(commands, parent, indent_col());
     let mut has_any = false;
@@ -1785,6 +2105,7 @@ fn build_nav_wheel_section(
                     badge,
                     Some(EditorAction::DeleteEntry { set: si, entry: ei }),
                     icons,
+                    focusables,
                 );
             }
             SetEntry::WheelSet(ws) => {
@@ -1832,6 +2153,25 @@ fn build_nav_wheel_section(
                     whr,
                     text(&format!("{}w", ws.wheels.len()), 9., DIM),
                 );
+                focusables.push(wsh);
+                // + add-wheel button for this wheel set
+                let add_w = clickable(
+                    commands,
+                    whr,
+                    bsn! {
+                        @FeathersButton { @variant: ButtonVariant::Plain }
+                        Node {
+                            padding: {UiRect::axes(px(4.), px(1.))},
+                            border: {UiRect::all(px(1.))},
+                            border_radius: {BorderRadius::all(px(3.))},
+                        }
+                        BorderColor::all(BLUE)
+                    },
+                    EditorAction::AddWheelToSet { set: si, entry: ei },
+                    Color::NONE,
+                );
+                cil_icon(commands, add_w, "cil-plus", 10., BLUE, icons);
+                focusables.push(add_w);
                 let dx = clickable(
                     commands,
                     whr,
@@ -1840,6 +2180,7 @@ fn build_nav_wheel_section(
                     Color::NONE,
                 );
                 cil_icon(commands, dx, "cil-trash", 11., DIMMER, icons);
+                focusables.push(dx);
 
                 let wsb = child(commands, body, indent_col());
                 for (wi, w) in ws.wheels.iter().enumerate() {
@@ -1870,17 +2211,9 @@ fn build_nav_wheel_section(
                             wheel: wi,
                         }),
                         icons,
+                        focusables,
                     );
                 }
-                let link = clickable(
-                    commands,
-                    wsb,
-                    row_button(Color::NONE),
-                    EditorAction::AddWheelToSet { set: si, entry: ei },
-                    Color::NONE,
-                );
-                cil_icon(commands, link, "cil-plus", 10., DIM, icons);
-                child(commands, link, text("add wheel", 10., DIM));
             }
             _ => {}
         }
@@ -1898,6 +2231,7 @@ fn build_nav_button_section(
     set: &ActionSet,
     si: usize,
     icons: &Icons<'_>,
+    focusables: &mut Vec<Entity>,
 ) {
     // Section header.
     let sec = child(
@@ -1931,6 +2265,7 @@ fn build_nav_button_section(
         Color::NONE,
     );
     cil_icon(commands, add_action_btn, "cil-plus", 12., AMBER, icons);
+    focusables.push(add_action_btn);
 
     let body = child(commands, parent, indent_col());
     let mut has_any = false;
@@ -1956,6 +2291,7 @@ fn build_nav_button_section(
                 badge,
                 Some(EditorAction::DeleteEntry { set: si, entry: ei }),
                 icons,
+                focusables,
             );
         }
     }
@@ -1965,7 +2301,7 @@ fn build_nav_button_section(
 }
 
 /// Save / Load footer.
-fn build_footer(commands: &mut Commands, parent: Entity, path: &str) {
+fn build_footer(commands: &mut Commands, parent: Entity, path: &str, focusables: &mut Vec<Entity>) {
     let footer = commands
         .spawn_scene(bsn! {
             Node {
@@ -1985,20 +2321,22 @@ fn build_footer(commands: &mut Commands, parent: Entity, path: &str) {
             Node { flex_direction: FlexDirection::Row, column_gap: {px(8.)} }
         },
     );
-    clickable(
+    let save = clickable(
         commands,
         row,
         footer_button("SAVE", GREEN, true),
         EditorAction::Save,
         GREEN_BG,
     );
-    clickable(
+    focusables.push(save);
+    let load = clickable(
         commands,
         row,
         footer_button("LOAD", DIM, false),
         EditorAction::Load,
         Color::NONE,
     );
+    focusables.push(load);
     let cap = child(
         commands,
         footer,
@@ -2048,6 +2386,10 @@ fn process_hud_buttons(
                 }
                 WheelHudAction::ToggleEditor => {
                     hud.editor_open = !hud.editor_open;
+                    info!(
+                        "[editor] ToggleEditor button — editor_open now={}",
+                        hud.editor_open
+                    );
                     if !hud.editor_open {
                         ui.selection = Selection::None;
                         ui.editing = EditFocus::None;
@@ -2104,6 +2446,10 @@ fn apply_action(
         EditorAction::SelectSet { set } => {
             ui.selection = Selection::Set { set };
             ui.editing = EditFocus::None;
+            // Sync the HUD live preview to show this set.
+            hud.active_set = set;
+            hud.active_wheel_entry = 0;
+            hud.highlighted = None;
         }
         EditorAction::EditSetName { set } => {
             ui.selection = Selection::Set { set };
@@ -2240,16 +2586,24 @@ fn apply_action(
             ui.selection = Selection::Action { set, entry };
             ui.editing = EditFocus::None;
             hud.highlighted = None;
+            // Sync the active set so the HUD shows the correct context.
+            hud.active_set = set;
         }
         EditorAction::SelectWheel { set, entry, wheel } => {
             ui.selection = Selection::Wheel { set, entry, wheel };
             ui.editing = EditFocus::None;
             hud.highlighted = None;
+            // Sync the HUD to preview the selected wheel.
+            hud.active_set = set;
+            hud.active_wheel_entry = wheel_entry_idx(cfg, set, entry);
         }
         EditorAction::SelectWheelSetEntry { set, entry } => {
             ui.selection = Selection::WheelSetEntry { set, entry };
             ui.editing = EditFocus::None;
             hud.highlighted = None;
+            // Sync the HUD to preview the selected wheel set.
+            hud.active_set = set;
+            hud.active_wheel_entry = wheel_entry_idx(cfg, set, entry);
         }
         EditorAction::SelectSetSwitch => {
             ui.selection = Selection::SetSwitch;
@@ -2428,6 +2782,9 @@ fn apply_action(
             };
             ui.editing = EditFocus::None;
             hud.highlighted = Some((set, entry, wheel, slot));
+            // Sync the HUD to preview the wheel containing this segment.
+            hud.active_set = set;
+            hud.active_wheel_entry = wheel_entry_idx(cfg, set, entry);
         }
         EditorAction::EditSlotIcon { slot } => {
             ui.editing = EditFocus::SlotIcon(slot);
@@ -2795,10 +3152,11 @@ fn spawn_box_field(
     value_color: Color,
     accent: Color,
     action: EditorAction,
-) {
+) -> Entity {
     let row = spawn_field(commands, parent, label);
     let b = clickable(commands, row, ctrl_box(accent), action, Color::NONE);
     child(commands, b, text(value, 11., value_color));
+    b
 }
 
 fn spawn_toggle_field(
@@ -2807,7 +3165,8 @@ fn spawn_toggle_field(
     label: &str,
     on: bool,
     action: EditorAction,
-) {
+    focusables: &mut Vec<Entity>,
+) -> Entity {
     let row = spawn_field(commands, parent, label);
     // Spawn the FeathersCheckbox scene, then insert EditorToggle separately
     // (avoids the FromTemplate/Default requirement for EditorAction).
@@ -2817,6 +3176,8 @@ fn spawn_toggle_field(
         commands.entity(e).insert(Checked);
     }
     commands.entity(row).add_child(e);
+    focusables.push(e);
+    e
 }
 
 fn spawn_stepper_field(
@@ -2827,7 +3188,7 @@ fn spawn_stepper_field(
     dec: EditorAction,
     inc: EditorAction,
     icons: &Icons<'_>,
-) {
+) -> (Entity, Entity) {
     let row = spawn_field(commands, parent, label);
     let d = clickable(commands, row, mini_box(), dec, CTRL_BG);
     cil_icon(commands, d, "cil-minus", 11., TEXT, icons);
@@ -2835,6 +3196,7 @@ fn spawn_stepper_field(
     child(commands, v, text(value, 11., TEXT));
     let i = clickable(commands, row, mini_box(), inc, CTRL_BG);
     cil_icon(commands, i, "cil-plus", 11., TEXT, icons);
+    (d, i)
 }
 
 // ─── editor panels ────────────────────────────────────────────────────────────────
@@ -2848,6 +3210,7 @@ fn spawn_action_editor(
     entry: usize,
     qa: &QuickAction,
     icons: &Icons<'_>,
+    focusables: &mut Vec<Entity>,
 ) {
     // Panel header: "BUTTON" label + delete
     let hdr = child(
@@ -2871,6 +3234,7 @@ fn spawn_action_editor(
         Color::NONE,
     );
     cil_icon(commands, dx, "cil-trash", 12., DIMMER, icons);
+    focusables.push(dx);
 
     let card = child(commands, parent, editor_card());
 
@@ -2881,7 +3245,7 @@ fn spawn_action_editor(
     } else {
         qa.name.clone()
     };
-    spawn_box_field(
+    let label_btn = spawn_box_field(
         commands,
         card,
         "Label",
@@ -2890,6 +3254,7 @@ fn spawn_action_editor(
         if nf { AMBER } else { BADGE_BORDER },
         EditorAction::EditName { set, entry },
     );
+    focusables.push(label_btn);
 
     // Unified input field (keyboard key or gamepad button, same as set shortcuts)
     {
@@ -2922,7 +3287,7 @@ fn spawn_action_editor(
         );
         if !kf && !qa.key.is_empty() {
             if let Some(btn_label) = qa.key.strip_prefix("GP:") {
-                if let Some(path) = icons.set.icon_path(btn_label) {
+                if let Some(path) = icons.set.embedded_icon_path(btn_label) {
                     let handle = icons.srv.load::<Image>(path);
                     let e = commands
                         .spawn((
@@ -2944,6 +3309,7 @@ fn spawn_action_editor(
         } else {
             child(commands, kb, text(&kd, 10., kc));
         }
+        focusables.push(kb);
 
         // Clear button — only when a key is bound and not currently capturing.
         if !qa.key.is_empty() && !kf {
@@ -2965,6 +3331,7 @@ fn spawn_action_editor(
                 Color::NONE,
             );
             cil_icon(commands, clear_btn, "cil-x", 10., HUD_DIM, icons);
+            focusables.push(clear_btn);
         }
 
         // Color swatch
@@ -2989,7 +3356,7 @@ fn spawn_action_editor(
     }
 
     // Action / command
-    spawn_box_field(
+    let action_btn = spawn_box_field(
         commands,
         card,
         "Action",
@@ -2998,6 +3365,7 @@ fn spawn_action_editor(
         BADGE_BORDER,
         EditorAction::CycleCommand { set, entry },
     );
+    focusables.push(action_btn);
 
     // Width + Height on one row
     {
@@ -3029,6 +3397,8 @@ fn spawn_action_editor(
             CTRL_BG,
         );
         cil_icon(commands, iw, "cil-plus", 11., TEXT, icons);
+        focusables.push(dw);
+        focusables.push(iw);
 
         child(commands, row, text("H", 9., DIM));
         let dh = clickable(
@@ -3057,6 +3427,8 @@ fn spawn_action_editor(
             CTRL_BG,
         );
         cil_icon(commands, ih, "cil-plus", 11., TEXT, icons);
+        focusables.push(dh);
+        focusables.push(ih);
     }
 
     // Enabled toggle
@@ -3066,6 +3438,7 @@ fn spawn_action_editor(
         "Enabled",
         qa.enabled,
         EditorAction::ToggleEnabled { set, entry },
+        focusables,
     );
 
     // Close HUD on select
@@ -3075,6 +3448,7 @@ fn spawn_action_editor(
         "Close on select",
         qa.close_on_select,
         EditorAction::ToggleActionCloseOnSelect { set, entry },
+        focusables,
     );
 
     // Reposition hint
@@ -3108,6 +3482,7 @@ fn spawn_wheel_editor(
     entry: usize,
     w_idx: Option<usize>,
     icons: &Icons<'_>,
+    focusables: &mut Vec<Entity>,
 ) {
     // ── WHEEL (basic) ──────────────────────────────────────────────────────────
     section_label(commands, parent, "WHEEL");
@@ -3120,7 +3495,7 @@ fn spawn_wheel_editor(
     } else {
         w.name.clone()
     };
-    spawn_box_field(
+    let name_btn = spawn_box_field(
         commands,
         card,
         "Name",
@@ -3129,9 +3504,10 @@ fn spawn_wheel_editor(
         if nf { AMBER } else { BADGE_BORDER },
         EditorAction::EditWheelName,
     );
+    focusables.push(name_btn);
 
     // Theme
-    spawn_box_field(
+    let theme_btn = spawn_box_field(
         commands,
         card,
         "Theme",
@@ -3140,9 +3516,10 @@ fn spawn_wheel_editor(
         BADGE_BORDER,
         EditorAction::CycleWheelTheme,
     );
+    focusables.push(theme_btn);
 
     // Stick side
-    spawn_box_field(
+    let stick_btn = spawn_box_field(
         commands,
         card,
         "Stick",
@@ -3151,9 +3528,10 @@ fn spawn_wheel_editor(
         BADGE_BORDER,
         EditorAction::CycleWheelStick,
     );
+    focusables.push(stick_btn);
 
     // Cooldown
-    spawn_stepper_field(
+    let (cd_dec, cd_inc) = spawn_stepper_field(
         commands,
         card,
         "Cooldown (s)",
@@ -3162,13 +3540,15 @@ fn spawn_wheel_editor(
         EditorAction::WheelCooldownDelta { delta: 0.5 },
         icons,
     );
+    focusables.push(cd_dec);
+    focusables.push(cd_inc);
 
     // ── APPEARANCE ─────────────────────────────────────────────────────────────
     section_label(commands, parent, "APPEARANCE");
     let app_card = child(commands, parent, editor_card());
 
     // Opacity
-    spawn_stepper_field(
+    let (op_dec, op_inc) = spawn_stepper_field(
         commands,
         app_card,
         "Opacity",
@@ -3177,6 +3557,8 @@ fn spawn_wheel_editor(
         EditorAction::WheelOpacityDelta { delta: 0.05 },
         icons,
     );
+    focusables.push(op_dec);
+    focusables.push(op_inc);
 
     // Show labels
     spawn_toggle_field(
@@ -3185,6 +3567,7 @@ fn spawn_wheel_editor(
         "Show labels",
         w.show_labels,
         EditorAction::ToggleWheelShowLabels,
+        focusables,
     );
 
     // Show icons
@@ -3194,10 +3577,11 @@ fn spawn_wheel_editor(
         "Show icons",
         w.show_icon,
         EditorAction::ToggleWheelShowIcon,
+        focusables,
     );
 
     // Segment Shape
-    spawn_box_field(
+    let seg_shape_btn = spawn_box_field(
         commands,
         app_card,
         "Seg shape",
@@ -3206,9 +3590,10 @@ fn spawn_wheel_editor(
         BADGE_BORDER,
         EditorAction::CycleSegmentShape,
     );
+    focusables.push(seg_shape_btn);
 
     // Segment Scale
-    spawn_stepper_field(
+    let (ss_dec, ss_inc) = spawn_stepper_field(
         commands,
         app_card,
         "Seg scale",
@@ -3217,6 +3602,8 @@ fn spawn_wheel_editor(
         EditorAction::SegmentScaleDelta { delta: 0.1 },
         icons,
     );
+    focusables.push(ss_dec);
+    focusables.push(ss_inc);
 
     // Highlight color
     {
@@ -3242,9 +3629,8 @@ fn spawn_wheel_editor(
             },
         );
         child(commands, b, text(&hex, 11., TEXT));
+        focusables.push(b);
     }
-
-    // ── BACKGROUND ─────────────────────────────────────────────────────────────
     section_label(commands, parent, "BACKGROUND");
     let bg_card = child(commands, parent, editor_card());
 
@@ -3256,7 +3642,7 @@ fn spawn_wheel_editor(
             w.bg_color.clone()
         };
         let col = if w.bg_color.is_empty() { DIMMER } else { TEXT };
-        spawn_box_field(
+        let bg_col_btn = spawn_box_field(
             commands,
             bg_card,
             "Color",
@@ -3265,10 +3651,11 @@ fn spawn_wheel_editor(
             BADGE_BORDER,
             EditorAction::CycleWheelBgColor,
         );
+        focusables.push(bg_col_btn);
     }
 
     // Bg opacity
-    spawn_stepper_field(
+    let (bg_op_dec, bg_op_inc) = spawn_stepper_field(
         commands,
         bg_card,
         "Opacity",
@@ -3277,13 +3664,15 @@ fn spawn_wheel_editor(
         EditorAction::WheelBgOpacityDelta { delta: 0.05 },
         icons,
     );
+    focusables.push(bg_op_dec);
+    focusables.push(bg_op_inc);
 
     // ── OUTER CIRCLE ───────────────────────────────────────────────────────────
     section_label(commands, parent, "OUTER CIRCLE");
     let out_card = child(commands, parent, editor_card());
 
     // Outer Radius
-    spawn_stepper_field(
+    let (or_dec, or_inc) = spawn_stepper_field(
         commands,
         out_card,
         "Radius",
@@ -3292,6 +3681,8 @@ fn spawn_wheel_editor(
         EditorAction::WheelOuterRadiusDelta { delta: 5.0 },
         icons,
     );
+    focusables.push(or_dec);
+    focusables.push(or_inc);
 
     // Outer border color
     {
@@ -3305,7 +3696,7 @@ fn spawn_wheel_editor(
         } else {
             TEXT
         };
-        spawn_box_field(
+        let ob_col_btn = spawn_box_field(
             commands,
             out_card,
             "Border color",
@@ -3314,10 +3705,11 @@ fn spawn_wheel_editor(
             BADGE_BORDER,
             EditorAction::CycleOuterBorderColor,
         );
+        focusables.push(ob_col_btn);
     }
 
     // Outer border width
-    spawn_stepper_field(
+    let (obw_dec, obw_inc) = spawn_stepper_field(
         commands,
         out_card,
         "Border width",
@@ -3326,13 +3718,15 @@ fn spawn_wheel_editor(
         EditorAction::WheelOuterBorderWidthDelta { delta: 0.5 },
         icons,
     );
+    focusables.push(obw_dec);
+    focusables.push(obw_inc);
 
     // ── INNER CIRCLE ───────────────────────────────────────────────────────────
     section_label(commands, parent, "INNER CIRCLE");
     let inn_card = child(commands, parent, editor_card());
 
     // Inner Radius
-    spawn_stepper_field(
+    let (ir_dec, ir_inc) = spawn_stepper_field(
         commands,
         inn_card,
         "Radius",
@@ -3341,6 +3735,8 @@ fn spawn_wheel_editor(
         EditorAction::WheelInnerRadiusDelta { delta: 2.0 },
         icons,
     );
+    focusables.push(ir_dec);
+    focusables.push(ir_inc);
 
     // Inner border color
     {
@@ -3354,7 +3750,7 @@ fn spawn_wheel_editor(
         } else {
             TEXT
         };
-        spawn_box_field(
+        let ib_col_btn = spawn_box_field(
             commands,
             inn_card,
             "Border color",
@@ -3363,10 +3759,11 @@ fn spawn_wheel_editor(
             BADGE_BORDER,
             EditorAction::CycleInnerBorderColor,
         );
+        focusables.push(ib_col_btn);
     }
 
     // Inner border width
-    spawn_stepper_field(
+    let (ibw_dec, ibw_inc) = spawn_stepper_field(
         commands,
         inn_card,
         "Border width",
@@ -3375,6 +3772,8 @@ fn spawn_wheel_editor(
         EditorAction::WheelInnerBorderWidthDelta { delta: 0.5 },
         icons,
     );
+    focusables.push(ibw_dec);
+    focusables.push(ibw_inc);
 
     // Hub background color
     {
@@ -3384,7 +3783,7 @@ fn spawn_wheel_editor(
             w.hub_color.clone()
         };
         let col = if w.hub_color.is_empty() { DIMMER } else { TEXT };
-        spawn_box_field(
+        let hub_col_btn = spawn_box_field(
             commands,
             inn_card,
             "Hub color",
@@ -3393,10 +3792,11 @@ fn spawn_wheel_editor(
             BADGE_BORDER,
             EditorAction::CycleWheelHubColor,
         );
+        focusables.push(hub_col_btn);
     }
 
     // Hub opacity
-    spawn_stepper_field(
+    let (hub_op_dec, hub_op_inc) = spawn_stepper_field(
         commands,
         inn_card,
         "Hub opacity",
@@ -3405,6 +3805,8 @@ fn spawn_wheel_editor(
         EditorAction::WheelHubOpacityDelta { delta: 0.05 },
         icons,
     );
+    focusables.push(hub_op_dec);
+    focusables.push(hub_op_inc);
 
     // ── SEGMENTS ───────────────────────────────────────────────────────────────
     let seg_hdr = child(
@@ -3436,7 +3838,8 @@ fn spawn_wheel_editor(
         EditorAction::AddSlot,
         Color::NONE,
     );
-    child(commands, add_slot_btn, text("+ Add", 9., GREEN));
+    child(commands, add_slot_btn, text("+", 9., GREEN));
+    focusables.push(add_slot_btn);
 
     let seg_card = child(commands, parent, editor_card());
     if w.slots.is_empty() {
@@ -3463,6 +3866,7 @@ fn spawn_wheel_editor(
             },
             row_bg,
         );
+        focusables.push(row);
         let left = child(commands, row, hcluster());
         child(commands, left, text(&format!("{}", i + 1), 9., DIMMER));
         if !slot.icon.is_empty() {
@@ -3489,6 +3893,7 @@ fn spawn_wheel_editor(
             Color::NONE,
         );
         cil_icon(commands, dx, "cil-trash", 11., DIMMER, icons);
+        focusables.push(dx);
     }
 }
 
@@ -3500,6 +3905,7 @@ fn spawn_segment_editor(
     slot: usize,
     w: &WheelData,
     icons: &Icons<'_>,
+    focusables: &mut Vec<Entity>,
 ) {
     let slot_data = w.slots.get(slot);
     let slot_name = slot_data.map(|s| s.name.as_str()).unwrap_or("");
@@ -3517,7 +3923,7 @@ fn spawn_segment_editor(
     } else {
         slot_name.to_string()
     };
-    spawn_box_field(
+    let seg_name_btn = spawn_box_field(
         commands,
         card,
         "Name",
@@ -3526,6 +3932,7 @@ fn spawn_segment_editor(
         if nf { AMBER } else { BADGE_BORDER },
         EditorAction::EditSlotName { slot },
     );
+    focusables.push(seg_name_btn);
 
     // Icon
     let icon_f = ui.editing == EditFocus::SlotIcon(slot);
@@ -3534,7 +3941,7 @@ fn spawn_segment_editor(
     } else {
         slot_icon.to_string()
     };
-    spawn_box_field(
+    let seg_icon_btn = spawn_box_field(
         commands,
         card,
         "Icon",
@@ -3543,6 +3950,7 @@ fn spawn_segment_editor(
         if icon_f { AMBER } else { BADGE_BORDER },
         EditorAction::EditSlotIcon { slot },
     );
+    focusables.push(seg_icon_btn);
 
     // Input binding (keyboard key or gamepad button)
     let inp_kf = ui.editing == EditFocus::SlotInput(slot);
@@ -3553,7 +3961,7 @@ fn spawn_segment_editor(
     } else {
         (slot_input.to_string(), TEXT)
     };
-    spawn_key_capture_field(
+    let inp_btn = spawn_key_capture_field(
         commands,
         card,
         "Input",
@@ -3565,7 +3973,9 @@ fn spawn_segment_editor(
         slot_input,
         inp_kf,
         icons,
+        focusables,
     );
+    focusables.push(inp_btn);
 
     // Close HUD on select
     spawn_toggle_field(
@@ -3574,6 +3984,7 @@ fn spawn_segment_editor(
         "Close on select",
         slot_data.map(|s| s.close_on_select).unwrap_or(false),
         EditorAction::ToggleSlotCloseOnSelect { slot },
+        focusables,
     );
 
     // ── Items section ───────────────────────────────────────────────────────────
@@ -3605,7 +4016,8 @@ fn spawn_segment_editor(
         EditorAction::AddSlotItem { slot },
         Color::NONE,
     );
-    child(commands, add_item_btn, text("+ Add", 9., TEAL));
+    child(commands, add_item_btn, text("+", 9., TEAL));
+    focusables.push(add_item_btn);
 
     let icard = child(commands, parent, editor_card());
     if items.is_empty() {
@@ -3662,8 +4074,7 @@ fn spawn_segment_editor(
             nb,
             text(&item_nd, 10., if iname_f { AMBER } else { TEXT }),
         );
-
-        // Item icon field
+        focusables.push(nb);
         let iicon_f = ui.editing == EditFocus::SlotItemIcon(slot, ii);
         let item_id = if iicon_f {
             format!("{}|", item.icon)
@@ -3694,7 +4105,7 @@ fn spawn_segment_editor(
             ib,
             text(&item_id, 10., if iicon_f { AMBER } else { DIM }),
         );
-
+        focusables.push(ib);
         let dx = clickable(
             commands,
             item_row,
@@ -3703,6 +4114,7 @@ fn spawn_segment_editor(
             Color::NONE,
         );
         cil_icon(commands, dx, "cil-trash", 11., DIMMER, icons);
+        focusables.push(dx);
     }
 }
 
@@ -3715,6 +4127,7 @@ fn spawn_wheelset_entry_editor(
     entry: usize,
     ws: &WheelSetData,
     icons: &Icons<'_>,
+    focusables: &mut Vec<Entity>,
 ) {
     section_label(commands, parent, "WHEEL SET");
     let card = child(commands, parent, editor_card());
@@ -3726,7 +4139,7 @@ fn spawn_wheelset_entry_editor(
     } else {
         ws.name.clone()
     };
-    spawn_box_field(
+    let ws_name_btn = spawn_box_field(
         commands,
         card,
         "Name",
@@ -3735,11 +4148,12 @@ fn spawn_wheelset_entry_editor(
         if nf { AMBER } else { BADGE_BORDER },
         EditorAction::EditWheelSetName { set, entry },
     );
+    focusables.push(ws_name_btn);
 
     // Switch Key
     let kf = ui.editing == EditFocus::WheelSetSwitchKey;
     let (kd, kc) = key_display(kf, &ws.switch_key);
-    spawn_key_capture_field(
+    let switch_key_btn = spawn_key_capture_field(
         commands,
         card,
         "Switch Key",
@@ -3751,10 +4165,12 @@ fn spawn_wheelset_entry_editor(
         &ws.switch_key,
         kf,
         icons,
+        focusables,
     );
+    focusables.push(switch_key_btn);
 
     // Stick side
-    spawn_box_field(
+    let stick_btn = spawn_box_field(
         commands,
         card,
         "Stick",
@@ -3763,6 +4179,7 @@ fn spawn_wheelset_entry_editor(
         BADGE_BORDER,
         EditorAction::CycleWheelSetStick,
     );
+    focusables.push(stick_btn);
 
     // Wheels sub-list
     let wh_hdr = child(
@@ -3793,7 +4210,8 @@ fn spawn_wheelset_entry_editor(
         EditorAction::AddWheelToSet { set, entry },
         Color::NONE,
     );
-    child(commands, add_wheel_to_set_btn, text("+ Add", 9., BLUE));
+    child(commands, add_wheel_to_set_btn, text("+", 9., BLUE));
+    focusables.push(add_wheel_to_set_btn);
 
     let wcard = child(commands, parent, editor_card());
     if ws.wheels.is_empty() {
@@ -3816,7 +4234,7 @@ fn spawn_wheelset_entry_editor(
                 entry,
                 wheel: Some(wi),
             },
-            "icons/editor/cil-aperture.png",
+            "embedded://bevy_quick_action_hud/embedded/icons/editor/cil-aperture.png",
             ICON,
             &w.name,
             TEAL,
@@ -3827,6 +4245,7 @@ fn spawn_wheelset_entry_editor(
                 wheel: wi,
             }),
             icons,
+            focusables,
         );
     }
 
@@ -3915,6 +4334,18 @@ fn focused_name<'a>(cfg: &'a mut QuickActionConfig, ui: &EditorUiState) -> Optio
 }
 
 // ─── keyboard input ───────────────────────────────────────────────────────────────
+
+/// Returns the ordinal position of `entry` among Wheel/WheelSet entries in the set.
+/// Used to sync `hud.active_wheel_entry` when the editor selects a wheel.
+fn wheel_entry_idx(cfg: &QuickActionConfig, set: usize, entry: usize) -> usize {
+    let Some(s) = cfg.sets.get(set) else {
+        return 0;
+    };
+    s.entries[..entry.min(s.entries.len())]
+        .iter()
+        .filter(|e| matches!(e, SetEntry::Wheel(_) | SetEntry::WheelSet(_)))
+        .count()
+}
 
 fn editor_text_input(
     mut messages: MessageReader<KeyboardInput>,
@@ -4239,7 +4670,9 @@ fn apply_set_shortcuts(
     mut hud: ResMut<WheelHudState>,
     ui: Res<EditorUiState>,
 ) {
-    if !hud.open || ui.editing != EditFocus::None {
+    // Don't switch sets while the editor sidebar is open — that would be confusing
+    // and could conflict with the editor's own DPad navigation.
+    if !hud.open || hud.editor_open || ui.editing != EditFocus::None {
         return;
     }
     if shortcut_just_pressed(&cfg.next_set_key, &keys, &gamepads) {
@@ -4264,7 +4697,11 @@ fn apply_set_shortcuts(
 }
 
 /// When the HUD is open, checks if any button's shortcut was just pressed.
-/// If `close_on_select` is set on that button, closes the HUD.
+///
+/// **Normal mode** (`editor_open = false`): if `close_on_select` is set, closes the HUD.
+///
+/// **Dry-run mode** (`editor_open = true`): shows a brief visual flash on the matching
+/// button but does **not** close the HUD and does **not** execute the action.
 fn hud_button_action_shortcuts(
     keys: Res<ButtonInput<KeyCode>>,
     gamepads: Query<&Gamepad>,
@@ -4278,14 +4715,21 @@ fn hud_button_action_shortcuts(
     let Some(set) = cfg.sets.get(hud.active_set) else {
         return;
     };
-    for entry in &set.entries {
+    for (ei, entry) in set.entries.iter().enumerate() {
         if let SetEntry::Action(qa) = entry {
-            if qa.key.is_empty() || !qa.close_on_select {
+            if qa.key.is_empty() {
                 continue;
             }
             if shortcut_just_pressed(&qa.key, &keys, &gamepads) {
-                hud.open = false;
-                hud.dirty = true;
+                if hud.editor_open {
+                    // Dry-run: flash the button, no action, no close.
+                    hud.flash_action_entry = Some(ei);
+                    hud.flash_action_ttl = 0.25;
+                    hud.dirty = true;
+                } else if qa.close_on_select {
+                    hud.open = false;
+                    hud.dirty = true;
+                }
             }
         }
     }
@@ -4300,7 +4744,8 @@ fn hud_wheel_nav(
     mut hud: ResMut<WheelHudState>,
     ui: Res<EditorUiState>,
 ) {
-    if !hud.open || ui.editing != EditFocus::None {
+    // Don't navigate wheels while the editor is open.
+    if !hud.open || hud.editor_open || ui.editing != EditFocus::None {
         return;
     }
     let Some(set) = cfg.sets.get(hud.active_set) else {
@@ -4343,16 +4788,39 @@ fn check_edit_shortcut(
     mut hud: ResMut<WheelHudState>,
     mut ui: ResMut<EditorUiState>,
 ) {
-    // Only active when the HUD overlay is visible and no capture is in progress.
-    if !hud.open || ui.editing != EditFocus::None || cfg.edit_shortcut.is_empty() {
+    if cfg.edit_shortcut.is_empty() {
+        return;
+    }
+    // Block while a key/gamepad capture is in progress.
+    if ui.editing != EditFocus::None {
+        debug!(
+            "[editor] edit shortcut blocked — capture in progress ({:?})",
+            ui.editing
+        );
         return;
     }
     if shortcut_just_pressed(&cfg.edit_shortcut, &keys, &gamepads) {
-        hud.editor_open = !hud.editor_open;
-        // When closing the editor, reset selection state.
-        if !hud.editor_open {
+        if hud.editor_open {
+            // Close editor.
+            info!(
+                "[editor] closing editor via shortcut (open={}, editor_open={})",
+                hud.open, hud.editor_open
+            );
+            hud.editor_open = false;
             ui.selection = Selection::None;
             ui.editing = EditFocus::None;
+        } else {
+            // Open editor — also force-open the HUD overlay so the wheel preview
+            // is visible even if the HUD was previously closed.
+            info!(
+                "[editor] opening editor via shortcut (was open={}, editor_open={})",
+                hud.open, hud.editor_open
+            );
+            hud.editor_open = true;
+            if !hud.open {
+                info!("[editor] auto-opening HUD so wheel preview is visible");
+                hud.open = true;
+            }
         }
         hud.dirty = true;
         ui.dirty = true;

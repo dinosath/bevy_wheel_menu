@@ -5,6 +5,7 @@
 
 pub mod editor;
 
+use bevy::asset::embedded_asset;
 use bevy::color::Alpha;
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -137,6 +138,13 @@ impl GamepadIconSet {
             },
         };
         Some(format!("{}/{}", base, file))
+    }
+
+    /// Returns the embedded asset path for a gamepad button label, for use
+    /// in internal `asset_server.load()` calls.
+    pub(crate) fn embedded_icon_path(self, label: &str) -> Option<String> {
+        self.icon_path(label)
+            .map(|p| format!("embedded://bevy_quick_action_hud/embedded/{p}"))
     }
 
     /// Detect icon set from USB vendor / product IDs reported by gilrs.
@@ -888,6 +896,107 @@ impl QuickActionHudPlugin {
 
 impl Plugin for QuickActionHudPlugin {
     fn build(&self, app: &mut App) {
+        // Embed plugin-internal assets so the plugin works as a library
+        // without requiring the consumer project to copy these files.
+        embedded_asset!(app, "embedded/shaders/wedge.wgsl");
+        // Editor UI icons
+        embedded_asset!(app, "embedded/icons/editor/cil-aperture.png");
+        embedded_asset!(app, "embedded/icons/editor/cil-applications-settings.png");
+        embedded_asset!(app, "embedded/icons/editor/cil-camera-control.png");
+        embedded_asset!(app, "embedded/icons/editor/cil-chevron-left.png");
+        embedded_asset!(app, "embedded/icons/editor/cil-chevron-right.png");
+        embedded_asset!(app, "embedded/icons/editor/cil-cog.png");
+        embedded_asset!(app, "embedded/icons/editor/cil-minus.png");
+        embedded_asset!(app, "embedded/icons/editor/cil-plus.png");
+        embedded_asset!(app, "embedded/icons/editor/cil-trash.png");
+        embedded_asset!(app, "embedded/icons/editor/cil-x.png");
+        // Xbox gamepad button icons
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_A_Color.png");
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_B_Color.png");
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_X_Color.png");
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_Y_Color.png");
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_LB.png");
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_RB.png");
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_LT.png");
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_RT.png");
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_Share.png");
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_Share-1.png");
+        embedded_asset!(
+            app,
+            "embedded/icons/XGamepad/Default/T_X_Left_Stick_Click.png"
+        );
+        embedded_asset!(
+            app,
+            "embedded/icons/XGamepad/Default/T_X_Right_Stick_Click.png"
+        );
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_Dpad_Up.png");
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_Dpad_Down.png");
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_Dpad_Left.png");
+        embedded_asset!(app, "embedded/icons/XGamepad/Default/T_X_Dpad_Right.png");
+        // PS4 gamepad button icons
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_Cross.png");
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_Circle.png");
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_Square.png");
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_Triangle.png");
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_L1.png");
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_R1.png");
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_L2.png");
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_R2.png");
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_Options.png");
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_Share.png");
+        embedded_asset!(
+            app,
+            "embedded/icons/P4Gamepad/Default/T_P4_Left_Stick_Click.png"
+        );
+        embedded_asset!(
+            app,
+            "embedded/icons/P4Gamepad/Default/T_P4_Right_Stick_Click.png"
+        );
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_Dpad_UP.png");
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_Dpad_Down.png");
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_Dpad_Left.png");
+        embedded_asset!(app, "embedded/icons/P4Gamepad/Default/T_P4_Dpad_Right.png");
+        // PS5 gamepad button icons
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_Cross.png");
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_Circle.png");
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_Square.png");
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_Triangle.png");
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_L1.png");
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_R1.png");
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_L2.png");
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_R2.png");
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_Options.png");
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_Share.png");
+        embedded_asset!(
+            app,
+            "embedded/icons/P5Gamepad/Default/T_P5_Left_Stick_Click_Alt.png"
+        );
+        embedded_asset!(
+            app,
+            "embedded/icons/P5Gamepad/Default/T_P5_Right_Stick_Click_Alt.png"
+        );
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_Dpad_UP.png");
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_Dpad_Down.png");
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_Dpad_Left.png");
+        embedded_asset!(app, "embedded/icons/P5Gamepad/Default/T_P5_Dpad_Right.png");
+        // Switch gamepad button icons
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_A.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_B.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_X.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_Y.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_LB.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_RB.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_LT.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_RT.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_Plus.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_Minus.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_L.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_R.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_Dpad_Up.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_Dpad_Down.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_Dpad_Left.png");
+        embedded_asset!(app, "embedded/icons/SGamepad/Default/T_S_Dpad_Right.png");
+
         // ── core wheel input / logic ──────────────────────────────────────────
         app.add_plugins(InputManagerPlugin::<WheelNavAction>::default())
             .init_resource::<GlobalBindings>()
@@ -945,6 +1054,7 @@ impl Plugin for QuickActionHudPlugin {
                         detect_gamepad_icon_set,
                         hud_button_feedback,
                         hud_stick_nav,
+                        tick_hud_dry_run_flash,
                         rebuild_hud,
                     )
                         .chain(),
@@ -1105,7 +1215,11 @@ pub fn emit_selection(
     gamepads: Query<&Gamepad>,
     q: Query<(Entity, &WheelState, Option<&WheelMenuConfig>)>,
     mut ev: MessageWriter<WheelMenuSelected>,
+    hud: Res<WheelHudState>,
 ) {
+    if hud.editor_open {
+        return;
+    }
     for gamepad in &gamepads {
         if gamepad.just_pressed(GamepadButton::South) {
             for (entity, state, config) in &q {
@@ -1315,7 +1429,11 @@ pub fn update_edit_mode(
     mut q: Query<(Entity, &WheelData, &WheelState, &mut WheelEditMode)>,
     mut mode_ev: MessageWriter<WheelEditModeChanged>,
     mut reorder_ev: MessageWriter<WheelSliceReorder>,
+    hud: Res<WheelHudState>,
 ) {
+    if hud.editor_open {
+        return;
+    }
     for (entity, menu, state, mut edit) in &mut q {
         for gamepad in &gamepads {
             if let Some(btn) = edit.toggle_button {
@@ -2129,9 +2247,9 @@ pub fn count_wheel_entries(set: &ActionSet) -> usize {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum HudOpenMode {
     /// Hold the trigger to keep the HUD open; releasing closes it.
-    #[default]
     Hold,
     /// First press opens the HUD; second press closes it.
+    #[default]
     Toggle,
 }
 
@@ -2219,8 +2337,8 @@ impl Default for QuickActionConfig {
             prev_set_key: "Q".into(),
             show_set_bar: true,
             cycle_sets: false,
-            edit_shortcut: String::new(),
-            hud_open_mode: HudOpenMode::Hold,
+            edit_shortcut: "GP:Start".into(),
+            hud_open_mode: HudOpenMode::Toggle,
             hud_bg_opacity: 1.0,
             hud_bg_color: String::new(),
             sets: vec![
@@ -2322,7 +2440,7 @@ pub struct WedgeMaterial {
 
 impl UiMaterial for WedgeMaterial {
     fn fragment_shader() -> ShaderRef {
-        "shaders/wedge.wgsl".into()
+        "embedded://bevy_quick_action_hud/embedded/shaders/wedge.wgsl".into()
     }
 }
 
@@ -2340,6 +2458,10 @@ pub struct WheelHudState {
     pub highlighted: Option<(usize, usize, Option<usize>, usize)>,
     /// Which wheel entry within the active set is currently active.
     pub active_wheel_entry: usize,
+    /// When the editor is open, which action-entry index is currently flashing as a dry-run preview.
+    pub flash_action_entry: Option<usize>,
+    /// Remaining seconds for the dry-run flash.
+    pub flash_action_ttl: f32,
 }
 impl Default for WheelHudState {
     fn default() -> Self {
@@ -2350,6 +2472,8 @@ impl Default for WheelHudState {
             editor_open: false,
             highlighted: None,
             active_wheel_entry: 0,
+            flash_action_entry: None,
+            flash_action_ttl: 0.0,
         }
     }
 }
@@ -2518,7 +2642,7 @@ pub fn build_hud_canvas(
         );
         // Show the assigned edit shortcut icon (if it's a gamepad button).
         if let Some(lbl) = cfg.edit_shortcut.strip_prefix("GP:") {
-            if let Some(path) = icon_set.icon_path(lbl) {
+            if let Some(path) = icon_set.embedded_icon_path(lbl) {
                 let handle = asset_server.load::<Image>(path);
                 let icon_e = commands
                     .spawn((
@@ -2534,7 +2658,9 @@ pub fn build_hud_canvas(
             }
         }
         {
-            let handle = asset_server.load::<Image>("icons/editor/cil-cog.png");
+            let handle = asset_server.load::<Image>(
+                "embedded://bevy_quick_action_hud/embedded/icons/editor/cil-cog.png",
+            );
             let e = commands
                 .spawn((
                     Node {
@@ -2652,7 +2778,14 @@ pub fn build_hud_canvas(
                 hud_text("No wheels in this set.", 11., HUD_DIMMER),
             );
         }
-        build_hud_action_buttons(commands, root, set, asset_server, icon_set);
+        build_hud_action_buttons(
+            commands,
+            root,
+            set,
+            asset_server,
+            icon_set,
+            hud.flash_action_entry,
+        );
     }
 }
 
@@ -2899,18 +3032,20 @@ fn build_hud_action_buttons(
     set: &ActionSet,
     asset_server: &AssetServer,
     icon_set: GamepadIconSet,
+    flash_entry: Option<usize>,
 ) {
-    let btns: Vec<&QuickAction> = set
+    let btns: Vec<(usize, &QuickAction)> = set
         .entries
         .iter()
-        .filter_map(|e| {
+        .enumerate()
+        .filter_map(|(i, e)| {
             if let SetEntry::Action(a) = e {
-                Some(a)
+                Some((i, a))
             } else {
                 None
             }
         })
-        .filter(|a| a.enabled)
+        .filter(|(_, a)| a.enabled)
         .collect();
     if btns.is_empty() {
         return;
@@ -2929,12 +3064,17 @@ fn build_hud_action_buttons(
         .id();
     commands.entity(parent).add_child(container);
 
-    for qa in btns.iter().rev() {
+    for (entry_idx, qa) in btns.iter().rev() {
+        let is_flash = flash_entry.map_or(false, |fi| fi == *entry_idx);
         let eff = (set.opacity * qa.opacity).clamp(0.05, 1.0);
         let w = qa.width.max(40.0);
         let h = qa.height.max(20.0);
-        let bg = parse_hex_color(&qa.color, eff * 0.85);
-        let tc = HUD_TEXT.with_alpha(eff);
+        let bg = if is_flash {
+            Color::srgba(0.38, 0.62, 0.95, 0.90) // bright blue flash
+        } else {
+            parse_hex_color(&qa.color, eff * 0.85)
+        };
+        let tc = HUD_TEXT.with_alpha(if is_flash { 1.0 } else { eff });
         let bc = HUD_BADGE_BORDER.with_alpha(eff);
 
         let row = hud_child(
@@ -2952,7 +3092,7 @@ fn build_hud_action_buttons(
             // GP: key → show the controller button icon; keyboard key → text badge.
             let mut showed_icon = false;
             if let Some(btn_label) = qa.key.strip_prefix("GP:") {
-                if let Some(path) = icon_set.icon_path(btn_label) {
+                if let Some(path) = icon_set.embedded_icon_path(btn_label) {
                     let handle = asset_server.load::<Image>(path);
                     let icon_e = commands
                         .spawn((
@@ -3050,7 +3190,9 @@ fn build_hud_set_tabs(
     );
     // Chevron-left PNG icon; gamepad icon overlays it when a button is assigned.
     {
-        let handle = asset_server.load::<Image>("icons/editor/cil-chevron-left.png");
+        let handle = asset_server.load::<Image>(
+            "embedded://bevy_quick_action_hud/embedded/icons/editor/cil-chevron-left.png",
+        );
         let e = commands
             .spawn((
                 Node {
@@ -3069,7 +3211,7 @@ fn build_hud_set_tabs(
     }
     // Overlay the assigned prev-set icon if it's a gamepad button.
     if let Some(lbl) = cfg.prev_set_key.strip_prefix("GP:") {
-        if let Some(path) = icon_set.icon_path(lbl) {
+        if let Some(path) = icon_set.embedded_icon_path(lbl) {
             let handle = asset_server.load::<Image>(path);
             let e = commands
                 .spawn((
@@ -3133,7 +3275,9 @@ fn build_hud_set_tabs(
     );
     // Chevron-right PNG icon; gamepad icon overlays it when a button is assigned.
     {
-        let handle = asset_server.load::<Image>("icons/editor/cil-chevron-right.png");
+        let handle = asset_server.load::<Image>(
+            "embedded://bevy_quick_action_hud/embedded/icons/editor/cil-chevron-right.png",
+        );
         let e = commands
             .spawn((
                 Node {
@@ -3152,7 +3296,7 @@ fn build_hud_set_tabs(
     }
     // Overlay the assigned next-set icon if it's a gamepad button.
     if let Some(lbl) = cfg.next_set_key.strip_prefix("GP:") {
-        if let Some(path) = icon_set.icon_path(lbl) {
+        if let Some(path) = icon_set.embedded_icon_path(lbl) {
             let handle = asset_server.load::<Image>(path);
             let e = commands
                 .spawn((
@@ -3283,34 +3427,50 @@ fn hud_stick_nav(
     if prev != new_highlight {
         // Release-to-use: emit selection when stick returns to dead-zone.
         if let (Some((s, e, w, slot)), None) = (prev, new_highlight) {
-            // Check close_on_select for this slot.
-            let slot_close = cfg
-                .sets
-                .get(s)
-                .and_then(|set| set.entries.get(e))
-                .and_then(|entry| match (entry, w) {
-                    (SetEntry::Wheel(wd), None) => wd.slots.get(slot),
-                    (SetEntry::WheelSet(ws), Some(wi)) => {
-                        ws.wheels.get(wi).and_then(|wd| wd.slots.get(slot))
-                    }
-                    _ => None,
-                })
-                .map(|s| s.close_on_select)
-                .unwrap_or(false);
+            if !hud.editor_open {
+                // Normal mode: fire selection and optionally close.
+                let slot_close = cfg
+                    .sets
+                    .get(s)
+                    .and_then(|set| set.entries.get(e))
+                    .and_then(|entry| match (entry, w) {
+                        (SetEntry::Wheel(wd), None) => wd.slots.get(slot),
+                        (SetEntry::WheelSet(ws), Some(wi)) => {
+                            ws.wheels.get(wi).and_then(|wd| wd.slots.get(slot))
+                        }
+                        _ => None,
+                    })
+                    .map(|s| s.close_on_select)
+                    .unwrap_or(false);
 
-            select_ev.write(HudSegmentSelected {
-                set: s,
-                entry: e,
-                wheel: w,
-                slot,
-            });
+                select_ev.write(HudSegmentSelected {
+                    set: s,
+                    entry: e,
+                    wheel: w,
+                    slot,
+                });
 
-            if slot_close {
-                hud.open = false;
+                if slot_close {
+                    hud.open = false;
+                }
             }
+            // Dry-run mode: highlight clears visually — no event, no close.
         }
         hud.highlighted = new_highlight;
         hud.dirty = true;
+    }
+}
+
+/// Counts down the dry-run flash timer.  When expired it clears the flash entry and
+/// triggers a HUD rebuild so the button returns to its normal colour.
+fn tick_hud_dry_run_flash(time: Res<Time>, mut hud: ResMut<WheelHudState>) {
+    // Only tick while a flash is active and the HUD is not already queued for rebuild.
+    if hud.flash_action_entry.is_some() && !hud.dirty {
+        hud.flash_action_ttl -= time.delta_secs();
+        if hud.flash_action_ttl <= 0.0 {
+            hud.flash_action_entry = None;
+            hud.dirty = true;
+        }
     }
 }
 
@@ -3327,6 +3487,11 @@ fn rebuild_hud(
         return;
     }
     hud.dirty = false;
+
+    debug!(
+        "[hud] rebuild_hud — open={} editor_open={} active_set={} active_wheel_entry={}",
+        hud.open, hud.editor_open, hud.active_set, hud.active_wheel_entry
+    );
 
     for e in &old_hud {
         commands.entity(e).despawn();
