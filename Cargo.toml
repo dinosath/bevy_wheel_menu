@@ -1,23 +1,71 @@
 [package]
 name = "bevy_quick_action_hud"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "A headless, gamepad-driven radial (wheel) menu library for Bevy 0.19"
+license = "MIT"
+repository = "https://github.com/dinosath/bevy_quick_action_hud"
+keywords = ["bevy", "hud", "wheel-menu", "gamepad", "ui"]
+categories = ["game-development", "graphics", "user-interfaces"]
 
 [dependencies]
-bevy = { version = "0.19", default-features = true, features = ["bevy_feathers", "webgl2"] }
+bevy = { version = "0.19", default-features = true, features = [
+    "bevy_ui",
+    "bevy_asset",
+    "bevy_scene",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_input",
+    "bevy_winit",
+    "bevy_text",
+] }
 serde = { version = "1", features = ["derive"] }
 ron = "0.12"
 bevy_tweening = "0.16"
 leafwing-input-manager = "0.21"
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "Window",
+    "PointerEvent",
+    "TouchEvent",
+    "Touch",
+    "TouchList",
+] }
+
+[features]
+default = ["hud", "editor"]
+hud = []
+editor = ["hud"]
+
 [[example]]
 name = "gamepad"
 path = "examples/gamepad.rs"
+required-features = []
 
 [[example]]
 name = "fps"
 path = "examples/fps.rs"
+required-features = ["editor"]
 
 [[example]]
 name = "editor"
 path = "examples/editor.rs"
+required-features = ["editor"]
+
+[lib]
+name = "bevy_quick_action_hud"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+strip = true

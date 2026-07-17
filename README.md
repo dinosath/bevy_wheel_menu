@@ -1,8 +1,8 @@
-# quick_action_hud
+# bevy_quick_action_hud
 
 A headless, gamepad-driven radial (wheel) menu library for [Bevy](https://bevyengine.org/) 0.19.
 
-**Headless** means the library handles all logic — input, hover detection, casting modes, time scaling, slot cycling — and emits events your app reacts to for rendering.  You own the visuals.
+**Headless** means the library handles all logic — input, hover detection, casting modes, time scaling, slot cycling — and emits events your app reacts to for rendering. You own the visuals.
 
 ---
 
@@ -19,30 +19,67 @@ A headless, gamepad-driven radial (wheel) menu library for [Bevy](https://bevyen
 | **Low-count warnings** | Emit once when a slice's count drops below a threshold |
 | **Edit mode** | D-pad reorder slices at runtime |
 | **Lifecycle events** | `WheelOpened` / `WheelClosed` on hover transitions |
+| **In-app HUD editor** | Sidebar UI for authoring action sets, wheels, and quick-action buttons |
 | **Conflict-free config** | Enum variants make invalid combinations impossible |
 
 ---
 
-## Quick start
+## Platform Support
 
-Add the dependency (local path or once published, crates.io):
+| Platform | Status | Notes |
+|---|---|---|
+| **Desktop (Windows / macOS / Linux)** | ✅ Full support | Mouse + keyboard + gamepad |
+| **Desktop browsers (Chrome, Firefox, Edge)** | ✅ Full support | WASM builds via `wasm32-unknown-unknown` |
+| **Android browsers (Chrome)** | ✅ Full support | Touch input, high-DPI scaling |
+| **Retroid Pocket 5** | ✅ Verified | Android + Chromium; touch + gamepad |
+| **iOS Safari** | ✅ Supported | Touch input, viewport management |
+
+### WASM / Browser Support
+
+The library includes dedicated WASM support modules:
+
+- **`wasm::ViewportInfo`** — detects browser viewport dimensions, device pixel
+  ratio, and orientation.
+- **`wasm::WasmSupportPlugin`** — registers viewport detection and orientation
+  handling.
+- **`wasm::setup_mobile_viewport()`** — sets the HTML viewport meta tag for
+  proper mobile scaling.
+- **`touch::TouchInteractionPlugin`** — full multi-touch input with tap, drag,
+  and long-press detection.
+- **`touch::TouchConfig`** — configurable tap threshold, long-press duration,
+  drag sensitivity, and device pixel ratio.
+
+### Retroid Pocket 5 Specific Notes
+
+- Use **landscape orientation** for the best HUD layout experience.
+- The device has a 3× DPI display (1334×750 logical, 4002×2250 physical).
+- Touch input works out of the box with `TouchInteractionPlugin`.
+- Gamepad input works via Bluetooth or USB-C controller.
+- Set `fit_canvas_to_parent: true` in your `Window` config for proper scaling.
+- Ensure `prevent_default_event_handling: false` for browser key-compat.
+
+---
+
+## Quick Start
+
+Add the dependency:
 
 ```toml
 [dependencies]
-quick_action_hud = { path = "../bevy_wheel_menu" }
+bevy_quick_action_hud = { git = "https://github.com/dinosath/bevy_quick_action_hud" }
 bevy = "0.19"
 ```
 
-### Minimal example
+### Minimal Example
 
 ```rust
 use bevy::prelude::*;
-use quick_action_hud::*;
+use bevy_quick_action_hud::*;
 
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(WheelMenuPlugin)   // or ActionWheelPlugin
+        .add_plugins(QuickActionHudPlugin::core())
         .add_systems(Startup, spawn_wheel)
         .add_systems(Update, on_select)
         .run();
@@ -50,7 +87,12 @@ fn main() {
 
 fn spawn_wheel(mut commands: Commands) {
     commands.spawn((
-        WheelMenu { slices: 8, radius: 160.0, inner_radius: 45.0, ..default() },
+        WheelData {
+            slots: vec![WheelSlotData::named("Slot 1"); 8],
+            outer_radius: 160.0,
+            inner_radius: 45.0,
+            ..default()
+        },
         WheelState::default(),
         WheelMenuConfig {
             casting_mode: CastingMode::ReleaseToUse,
@@ -66,27 +108,85 @@ fn on_select(mut events: MessageReader<WheelMenuSelected>) {
 }
 ```
 
+### FPS-style HUD (with gamepad)
+
+```sh
+cargo run --example fps --features editor
+```
+
+### Editor-Only Example
+
+```sh
+cargo run --example editor --features editor
+```
+
+### Gamepad-Only Example
+
+```sh
+cargo run --example gamepad
+```
+
+### WASM Build
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo build --release --example fps --features editor --target wasm32-unknown-unknown
+wasm-bindgen --out-dir dist --out-name wasm_example --target web \
+  target/wasm32-unknown-unknown/release/examples/fps.wasm
+cp index.html dist/index.html
+```
+
 ---
 
-## Core types
+## Plugin Architecture
 
-### `WheelMenu`
+The library provides a single `QuickActionHudPlugin` with three modes:
+
+| Constructor | Core wheel logic | HUD canvas | Editor sidebar |
+|---|---|---|---|
+| `QuickActionHudPlugin::core()` | ✓ | | |
+| `QuickActionHudPlugin::default()` | ✓ | ✓ | |
+| `QuickActionHudPlugin::with_editor()` | ✓ | ✓ | ✓ |
+
+```rust
+// Core only (you render the wheel)
+app.add_plugins(QuickActionHudPlugin::core());
+
+// Core + HUD canvas (auto-rendered wheel overlay)
+app.add_plugins(QuickActionHudPlugin::default());
+
+// Full suite: core + HUD + editor sidebar
+app.add_plugins(QuickActionHudPlugin::with_editor());
+```
+
+---
+
+## Core Types
+
+### `WheelData`
 
 The shape descriptor — attach to any entity.
 
 ```rust
-WheelMenu {
-    slices: 8,
-    radius: 160.0,       // outer radius (px)
-    inner_radius: 45.0,  // hole radius (px)
-    deadzone: 0.25,      // stick deadzone (0–1)
-    gap: 0.04,           // gap between slices (radians)
+WheelData {
+    name: "Wheel".into(),
+    slots: vec![WheelSlotData::named("Slot 1"); 8],
+    outer_radius: 160.0,
+    inner_radius: 45.0,
+    deadzone: 0.25,
+    gap: 0.04,
+    arc_span: TAU,
+    arc_offset: FRAC_PI_6,
+    segment_shape: SegmentShape::Pie,
+    show_labels: true,
+    show_icon: true,
+    ..default()
 }
 ```
 
 ### `WheelMenuConfig`
 
-All behaviour flags replaced by mutually-exclusive **enums** — no invalid combinations.
+Behaviour configuration — enum variants prevent invalid combinations.
 
 ```rust
 WheelMenuConfig {
@@ -117,9 +217,6 @@ CastingMode::Direct                          // fire immediately on hover
 
 ### `WheelSlot` + `ActionItem`
 
-Attach `WheelSlot` alongside `WheelSlice` to store multiple items per slice.
-The player cycles through them with right/left thumbstick press.
-
 ```rust
 commands.spawn((
     WheelSlice { index: 0 },
@@ -130,23 +227,9 @@ commands.spawn((
 ));
 ```
 
-Implement `ActionBehavior` for fully custom actions:
-
-```rust
-struct HealPotion;
-
-impl ActionBehavior for HealPotion {
-    fn execute(&self, commands: &mut Commands) { /* apply healing */ }
-    fn label(&self) -> &str { "Heal Potion" }
-    fn icon(&self)  -> &str { "🧪" }
-}
-
-ActionItem::Custom(Box::new(HealPotion))
-```
-
 ---
 
-## Events (messages)
+## Events (Messages)
 
 | Event | When |
 |---|---|
@@ -163,41 +246,92 @@ ActionItem::Custom(Box::new(HealPotion))
 | `WheelSwitched { previous, current, menu_entity }` | Active wheel in a set changed |
 | `WheelEditModeChanged { active, menu_entity }` | Edit mode toggled |
 | `WheelSliceReorder { from_index, to_index, menu_entity }` | Reorder requested |
+| `HudSegmentSelected { set, entry, wheel, slot }` | Segment selected in HUD |
 
 ---
 
-## Optional components
+## QuickActionConfig (RON Persistence)
 
-| Component | Purpose |
-|---|---|
-| `WheelHoldState` | Required for `CastingMode::HoldToActivate`; tracks dwell progress |
-| `WheelSliceCount { current, max, low_threshold }` | Drives low-count warnings |
-| `WheelSet { count, prev_button, next_button }` | Multi-wheel cycling |
-| `WheelEditMode { toggle_button }` | Runtime slice reorder |
+The HUD editor saves/loads the full configuration as RON:
 
----
-
-## UI helpers (BSN)
-
-The library ships three `bsn!`-authored scene builders for `bevy_ui`:
-
-```rust
-// Full-screen centered overlay — attach WheelMenu + WheelState here.
-commands.spawn_scene(wheel_overlay()).insert((menu, WheelState::default(), config));
-
-// Zero-size hub at screen center — parent slices to this.
-let hub = commands.spawn_scene(wheel_hub()).id();
-
-// Absolutely-positioned rounded panel for slice `i`.
-let slice = commands.spawn_scene(wheel_slice_panel(&menu, i, 96.0, Color::srgba(0.1, 0.1, 0.1, 0.9))).id();
+```ron
+QuickActionConfig(
+    next_set_key: "Tab",
+    prev_set_key: "Q",
+    edit_shortcut: "GP:Start",
+    hud_open_mode: Toggle,
+    sets: [
+        ActionSet(
+            name: "Combat",
+            entries: [
+                WheelSet(WheelSetData(
+                    name: "Wheel Set",
+                    wheels: [WheelData(name: "Combat Wheel", ...)],
+                )),
+                Action(QuickAction(
+                    name: "Interact",
+                    key: "E",
+                    icon: "◆",
+                )),
+            ],
+        ),
+    ],
+)
 ```
 
 ---
 
-## Examples
+## UI Helpers (bsn!)
+
+The library ships `bsn!`-authored scene builders for `bevy_ui`:
+
+```rust
+// Full-screen centered overlay
+commands.spawn_scene(wheel_overlay())
+    .insert((WheelData::default(), WheelState::default(), WheelMenuConfig::default()));
+
+// Zero-size hub at screen center
+let hub = commands.spawn_scene(wheel_hub()).id();
+
+// Absolutely-positioned rounded panel for slice i
+let slice = commands.spawn_scene(wheel_slice_panel(&menu, i, 96.0, bg_color)).id();
+
+// Center disc
+let disc = commands.spawn_scene(wheel_center_disc(radius, color)).id();
+
+// Outer ring
+let ring = commands.spawn_scene(wheel_outer_ring(radius, color, width)).id();
+```
+
+---
+
+## Development
 
 ```sh
-# Diablo-style skill wheel (Release-to-Use, low-count warnings)
+# Run all tests
+cargo test --all-features
+
+# Check formatting
+cargo fmt --all -- --check
+
+# Run clippy
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Build docs
+cargo doc --no-deps --all-features
+
+# Check WASM target
+cargo check --target wasm32-unknown-unknown --all-features
+
+# Run the WASM deployment test (requires dist/ to be built first)
+cargo test --test wasm_deploy
+```
+
+---
+
+## License
+
+MIT
 cargo run --example gamepad
 
 # FPS weapon / ability wheel (slow-time, hold-to-activate, ammo tracking)

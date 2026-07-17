@@ -1,0 +1,31 @@
+# cargo-deny configuration
+[advisories]
+vulnerability = "deny"
+unmaintained = "warn"
+notice = "warn"
+ignore = []
+
+[licenses]
+unlicensed = "deny"
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "Zlib",
+    "ISC",
+    "BSD-3-Clause",
+    "Unicode-DFS-2016",
+]
+deny = []
+skip = []
+skip-tree = []
+
+[bans]
+multiple-versions = "warn"
+skip = []
+skip-tree = []
+
+[sources]
+unknown-git = "deny"
+unknown-registry = "deny"
+allow-git = []

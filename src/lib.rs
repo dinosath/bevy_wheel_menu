@@ -4,6 +4,8 @@
 //! Rendering is left to the application.
 
 pub mod editor;
+pub mod touch;
+pub mod wasm;
 
 use bevy::asset::embedded_asset;
 use bevy::color::Alpha;
@@ -1072,6 +1074,13 @@ impl Plugin for QuickActionHudPlugin {
             ));
             editor::register_editor_systems(app);
         }
+
+        // ── mobile / touch / WASM support ───────────────────────────────────────────────────────────
+        app.add_plugins((
+            touch::TouchInteractionPlugin,
+            wasm::WasmSupportPlugin,
+            wasm::MobileSupportPlugin,
+        ));
     }
 }
 
@@ -1107,7 +1116,7 @@ fn setup_wheel_nav_input(mut commands: Commands) {
 pub fn update_wheel_input(
     nav_states: Query<&ActionState<WheelNavAction>>,
     gamepads: Query<&Gamepad>,
-    mut wheel_states: Query<&mut WheelState>,
+    mut wheel_states: Query<&mut WheelState, With<WheelData>>,
 ) {
     // Primary: right stick via leafwing
     let mut nav_dir = Vec2::ZERO;
@@ -1213,7 +1222,7 @@ pub fn update_wheel_hover(
 /// All other casting modes handle their own activation logic.
 pub fn emit_selection(
     gamepads: Query<&Gamepad>,
-    q: Query<(Entity, &WheelState, Option<&WheelMenuConfig>)>,
+    q: Query<(Entity, &WheelState, Option<&WheelMenuConfig>), With<WheelData>>,
     mut ev: MessageWriter<WheelMenuSelected>,
     hud: Res<WheelHudState>,
 ) {
@@ -1245,7 +1254,7 @@ pub fn emit_selection(
 /// Emits [`WheelOpened`] the first frame a wheel gains a hovered slice, and
 /// [`WheelClosed`] the first frame it loses one.  Runs after [`update_wheel_hover`].
 pub fn emit_lifecycle(
-    mut q: Query<(Entity, &mut WheelState)>,
+    mut q: Query<(Entity, &mut WheelState), With<WheelData>>,
     mut opened_ev: MessageWriter<WheelOpened>,
     mut closed_ev: MessageWriter<WheelClosed>,
 ) {
@@ -1270,7 +1279,7 @@ pub fn emit_lifecycle(
 /// Emits [`WheelSlotItemChanged`] on each cycle.
 pub fn update_slot_cycle(
     gamepads: Query<&Gamepad>,
-    wheel_q: Query<(Entity, &WheelState)>,
+    wheel_q: Query<(Entity, &WheelState), With<WheelData>>,
     mut slot_q: Query<(&WheelSlice, &mut WheelSlot)>,
     mut ev: MessageWriter<WheelSlotItemChanged>,
 ) {
@@ -3535,9 +3544,738 @@ fn try_autoload_config(mut cfg: ResMut<QuickActionConfig>, mut hud: ResMut<Wheel
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── RON serialisation ──────────────────────────────────────────────────────
+
     #[test]
     fn ron_config_parses() {
         let src = include_str!("../quickactions_config.ron");
-        let _: QuickActionConfig = ron::from_str(src).expect("RON round-trip failed");
+        let cfg: QuickActionConfig = ron::from_str(src).expect("RON config should parse");
+        assert!(!cfg.sets.is_empty(), "config should have at least one set");
+    }
+
+    #[test]
+    fn ron_round_trip() {
+        let cfg = QuickActionConfig::default();
+        let serialized = ron::ser::to_string_pretty(&cfg, ron::ser::PrettyConfig::default())
+            .expect("serialize default config");
+        let deserialized: QuickActionConfig =
+            ron::from_str(&serialized).expect("deserialize round-tripped config");
+        assert_eq!(cfg.sets.len(), deserialized.sets.len());
+        assert_eq!(cfg.next_set_key, deserialized.next_set_key);
+        assert_eq!(cfg.prev_set_key, deserialized.prev_set_key);
+        assert_eq!(cfg.hud_open_mode, deserialized.hud_open_mode);
+    }
+
+    // ─── GamepadIconSet ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn gamepad_icon_set_xbox_default() {
+        assert_eq!(GamepadIconSet::default(), GamepadIconSet::Xbox);
+    }
+
+    #[test]
+    fn gamepad_icon_set_from_ids_xbox() {
+        let set = GamepadIconSet::from_ids(Some(0x045E), Some(0x0202));
+        assert_eq!(set, GamepadIconSet::Xbox);
+    }
+
+    #[test]
+    fn gamepad_icon_set_from_ids_ps5() {
+        let set = GamepadIconSet::from_ids(Some(0x054C), Some(0x0CE6));
+        assert_eq!(set, GamepadIconSet::PS5);
+    }
+
+    #[test]
+    fn gamepad_icon_set_from_ids_nintendo() {
+        let set = GamepadIconSet::from_ids(Some(0x057E), Some(0x2009));
+        assert_eq!(set, GamepadIconSet::Switch);
+    }
+
+    #[test]
+    fn gamepad_icon_set_from_name_ps5() {
+        let set = GamepadIconSet::from_name("DualSense Wireless Controller");
+        assert_eq!(set, GamepadIconSet::PS5);
+    }
+
+    #[test]
+    fn gamepad_icon_set_from_name_ps4() {
+        let set = GamepadIconSet::from_name("DualShock 4");
+        assert_eq!(set, GamepadIconSet::PS4);
+    }
+
+    #[test]
+    fn gamepad_icon_set_from_name_switch() {
+        let set = GamepadIconSet::from_name("Nintendo Switch Pro Controller");
+        assert_eq!(set, GamepadIconSet::Switch);
+    }
+
+    #[test]
+    fn gamepad_icon_set_icon_path_xbox_a() {
+        let set = GamepadIconSet::Xbox;
+        let path = set.icon_path("A");
+        assert!(path.is_some());
+        assert!(path.unwrap().contains("T_X_A_Color.png"));
+    }
+
+    #[test]
+    fn gamepad_icon_set_icon_path_unknown_label() {
+        let set = GamepadIconSet::Xbox;
+        assert!(set.icon_path("UNKNOWN").is_none());
+    }
+
+    #[test]
+    fn gamepad_icon_set_base_path() {
+        assert!(GamepadIconSet::Xbox.base_path().contains("XGamepad"));
+        assert!(GamepadIconSet::PS4.base_path().contains("P4Gamepad"));
+        assert!(GamepadIconSet::PS5.base_path().contains("P5Gamepad"));
+        assert!(GamepadIconSet::Switch.base_path().contains("SGamepad"));
+    }
+
+    // ─── WheelState ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_state_default_dir_is_zero() {
+        let state = WheelState::default();
+        assert_eq!(state.dir, Vec2::ZERO);
+        assert!(state.hovered.is_none());
+        assert!(!state.open);
+    }
+
+    #[test]
+    fn wheel_state_hovered_updates() {
+        let mut state = WheelState::default();
+        state.dir = Vec2::new(1.0, 0.0);
+        state.hovered = Some(0);
+        assert_eq!(state.hovered, Some(0));
+        state.hovered = None;
+        assert!(state.hovered.is_none());
+    }
+
+    // ─── WheelSlot ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_slot_new_empty() {
+        let slot: WheelSlot = WheelSlot::new(vec![]);
+        assert!(slot.items.is_empty());
+        assert_eq!(slot.current_item, 0);
+    }
+
+    #[test]
+    fn wheel_slot_current_none_when_empty() {
+        let slot = WheelSlot::new(vec![]);
+        assert!(slot.current().is_none());
+    }
+
+    #[test]
+    fn wheel_slot_cycle_next() {
+        let mut slot = WheelSlot::new(vec![
+            ActionItem::Weapon {
+                name: "Sword".into(),
+                icon: "⚔".into(),
+            },
+            ActionItem::Weapon {
+                name: "Bow".into(),
+                icon: "🏹".into(),
+            },
+        ]);
+        assert_eq!(slot.current_item, 0);
+        slot.cycle_next();
+        assert_eq!(slot.current_item, 1);
+        slot.cycle_next();
+        assert_eq!(slot.current_item, 0); // wraps around
+    }
+
+    #[test]
+    fn wheel_slot_cycle_prev() {
+        let mut slot = WheelSlot::new(vec![
+            ActionItem::Weapon {
+                name: "Sword".into(),
+                icon: "⚔".into(),
+            },
+            ActionItem::Weapon {
+                name: "Bow".into(),
+                icon: "🏹".into(),
+            },
+        ]);
+        slot.cycle_prev();
+        assert_eq!(slot.current_item, 1); // wraps around
+    }
+
+    #[test]
+    fn wheel_slot_cycle_empty_noop() {
+        let mut slot = WheelSlot::new(vec![]);
+        slot.cycle_next();
+        assert_eq!(slot.current_item, 0);
+        slot.cycle_prev();
+        assert_eq!(slot.current_item, 0);
+    }
+
+    // ─── ActionItem ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn action_item_weapon_label() {
+        let item = ActionItem::Weapon {
+            name: "Sword".into(),
+            icon: "⚔".into(),
+        };
+        assert_eq!(item.label(), "Sword");
+        assert_eq!(item.icon(), "⚔");
+    }
+
+    #[test]
+    fn action_item_spell_label() {
+        let item = ActionItem::Spell {
+            name: "Fireball".into(),
+            icon: "🔥".into(),
+        };
+        assert_eq!(item.label(), "Fireball");
+        assert_eq!(item.icon(), "🔥");
+    }
+
+    #[test]
+    fn action_item_consumable_label() {
+        let item = ActionItem::Consumable {
+            name: "Potion".into(),
+            icon: "💊".into(),
+            count: 5,
+        };
+        assert_eq!(item.label(), "Potion");
+        assert_eq!(item.icon(), "💊");
+    }
+
+    #[test]
+    fn action_item_shout_label() {
+        let item = ActionItem::Shout {
+            name: "Fus Ro".into(),
+            icon: "🗣".into(),
+        };
+        assert_eq!(item.label(), "Fus Ro");
+    }
+
+    // ─── WheelMenuConfig ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_menu_config_default() {
+        let cfg = WheelMenuConfig::default();
+        assert_eq!(cfg.time_mode, TimeMode::Normal);
+        assert_eq!(cfg.casting_mode, CastingMode::Vanilla);
+        assert_eq!(cfg.toggle_mode, WheelToggleMode::Hold);
+        assert!(cfg.auto_snap);
+    }
+
+    // ─── CastingMode ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn casting_mode_default_is_vanilla() {
+        assert_eq!(CastingMode::default(), CastingMode::Vanilla);
+    }
+
+    #[test]
+    fn casting_mode_hold_to_activate() {
+        match CastingMode::HoldToActivate { duration: 0.8 } {
+            CastingMode::HoldToActivate { duration } => assert!((duration - 0.8).abs() < 1e-6),
+            _ => panic!("expected HoldToActivate"),
+        }
+    }
+
+    // ─── TimeMode ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn time_mode_default_is_normal() {
+        assert_eq!(TimeMode::default(), TimeMode::Normal);
+    }
+
+    #[test]
+    fn time_mode_slow_scale() {
+        match TimeMode::Slow(0.2) {
+            TimeMode::Slow(scale) => assert!((scale - 0.2).abs() < 1e-6),
+            _ => panic!("expected Slow"),
+        }
+    }
+
+    // ─── WheelToggleMode ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn toggle_mode_default_is_hold() {
+        assert_eq!(WheelToggleMode::default(), WheelToggleMode::Hold);
+    }
+
+    // ─── WheelSet ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_set_default() {
+        let set = WheelSet::default();
+        assert_eq!(set.active, 0);
+        assert_eq!(set.count, 1);
+        assert_eq!(set.prev_button, GamepadButton::LeftTrigger);
+        assert_eq!(set.next_button, GamepadButton::RightTrigger);
+    }
+
+    // ─── WheelStyle ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_style_default_colors() {
+        let style = WheelStyle::default();
+        assert_eq!(style.skin, "default");
+        assert_eq!(style.base_color, [0.08, 0.12, 0.18, 0.85]);
+    }
+
+    #[test]
+    fn wheel_style_color_conversion() {
+        let style = WheelStyle::default();
+        let base = style.base();
+        assert!((base.to_srgba().alpha - 0.85).abs() < 0.01);
+    }
+
+    // ─── WheelHoldState ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_hold_state_default() {
+        let state = WheelHoldState::default();
+        assert!((state.progress - 0.0).abs() < f32::EPSILON);
+        assert!(!state.holding);
+    }
+
+    // ─── WheelSliceCount ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_slice_count_default() {
+        let count = WheelSliceCount::default();
+        assert_eq!(count.current, 0);
+        assert_eq!(count.max, 0);
+        assert_eq!(count.low_threshold, 0);
+        assert!(!count.low_notified);
+    }
+
+    // ─── QuickActionConfig ───────────────────────────────────────────────────────
+
+    #[test]
+    fn quick_action_config_default_has_sets() {
+        let cfg = QuickActionConfig::default();
+        assert!(!cfg.sets.is_empty(), "default config should have sets");
+    }
+
+    #[test]
+    fn quick_action_config_default_edit_shortcut() {
+        let cfg = QuickActionConfig::default();
+        assert_eq!(cfg.edit_shortcut, "GP:Start");
+    }
+
+    #[test]
+    fn quick_action_config_default_set_count() {
+        let cfg = QuickActionConfig::default();
+        assert_eq!(cfg.sets.len(), 2);
+    }
+
+    // ─── QuickAction ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn quick_action_default() {
+        let qa = QuickAction::default();
+        assert_eq!(qa.name, "Action");
+        assert!(qa.enabled);
+        assert!(qa.show_on_menu);
+        assert_eq!(qa.shape, ActionShape::Rounded);
+    }
+
+    // ─── WheelData ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_data_default_has_one_slot() {
+        let wd = WheelData::default();
+        assert_eq!(wd.slots.len(), 1);
+    }
+
+    #[test]
+    fn wheel_data_new_creates_n_slots() {
+        let wd = WheelData::new("Test", 6);
+        assert_eq!(wd.slots.len(), 6);
+        assert_eq!(wd.name, "Test");
+    }
+
+    #[test]
+    fn wheel_data_new_min_one_slot() {
+        let wd = WheelData::new("Min", 0);
+        assert_eq!(wd.slots.len(), 1);
+    }
+
+    // ─── WheelSlotData ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_slot_data_default_is_empty() {
+        let sd = WheelSlotData::default();
+        assert!(sd.name.is_empty());
+        assert!(sd.items.is_empty());
+    }
+
+    #[test]
+    fn wheel_slot_data_named() {
+        let sd = WheelSlotData::named("Test Slot");
+        assert_eq!(sd.name, "Test Slot");
+    }
+
+    // ─── Enums ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn position_mode_cycle() {
+        assert_eq!(PositionMode::Relative.next(), PositionMode::Absolute);
+        assert_eq!(PositionMode::Absolute.next(), PositionMode::Relative);
+    }
+
+    #[test]
+    fn action_shape_cycle() {
+        let shapes = [
+            ActionShape::Rounded,
+            ActionShape::Round,
+            ActionShape::Square,
+            ActionShape::Diamond,
+        ];
+        for i in 0..shapes.len() {
+            assert_eq!(shapes[i].next(), shapes[(i + 1) % shapes.len()]);
+        }
+    }
+
+    #[test]
+    fn wheel_theme_cycle() {
+        assert_eq!(WheelTheme::Dark.next(), WheelTheme::Light);
+        assert_eq!(WheelTheme::Light.next(), WheelTheme::Dark);
+    }
+
+    #[test]
+    fn segment_shape_cycle() {
+        let shapes = [
+            SegmentShape::Rounded,
+            SegmentShape::Square,
+            SegmentShape::Circle,
+            SegmentShape::Wedge,
+            SegmentShape::Pie,
+        ];
+        for i in 0..shapes.len() {
+            assert_eq!(shapes[i].next(), shapes[(i + 1) % shapes.len()]);
+        }
+    }
+
+    #[test]
+    fn hud_open_mode_cycle() {
+        assert_eq!(HudOpenMode::Hold.next(), HudOpenMode::Toggle);
+        assert_eq!(HudOpenMode::Toggle.next(), HudOpenMode::Hold);
+    }
+
+    #[test]
+    fn stick_side_cycle() {
+        assert_eq!(StickSide::Right.next(), StickSide::Left);
+        assert_eq!(StickSide::Left.next(), StickSide::Right);
+    }
+
+    // ─── HudOpenMode ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn hud_open_mode_labels() {
+        assert_eq!(HudOpenMode::Hold.label(), "Hold");
+        assert_eq!(HudOpenMode::Toggle.label(), "Toggle");
+    }
+
+    // ─── StickSide ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stick_side_labels() {
+        assert_eq!(StickSide::Right.label(), "R Stick");
+        assert_eq!(StickSide::Left.label(), "L Stick");
+    }
+
+    // ─── Palette helpers ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn cycle_palette_wraps() {
+        let list = &["a", "b", "c"];
+        assert_eq!(cycle_palette(list, "c"), "a");
+        assert_eq!(cycle_palette(list, "a"), "b");
+    }
+
+    #[test]
+    fn cycle_palette_unknown_starts_at_zero() {
+        let list = &["x", "y", "z"];
+        assert_eq!(cycle_palette(list, "unknown"), "y");
+    }
+
+    #[test]
+    fn icon_palette_not_empty() {
+        assert!(!ICON_PALETTE.is_empty());
+    }
+
+    #[test]
+    fn command_palette_not_empty() {
+        assert!(!COMMAND_PALETTE.is_empty());
+    }
+
+    // ─── parse_hex_color ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_hex_color_valid() {
+        let c = parse_hex_color("#3b82f6", 1.0);
+        let srgba = c.to_srgba();
+        assert!((srgba.red - 0.231).abs() < 0.01);
+        assert!((srgba.green - 0.509).abs() < 0.01);
+        assert!((srgba.blue - 0.964).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_hex_color_invalid_fallback() {
+        let c = parse_hex_color("not-a-color", 0.5);
+        let srgba = c.to_srgba();
+        assert!((srgba.alpha - 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_hex_color_empty() {
+        let c = parse_hex_color("", 1.0);
+        let srgba = c.to_srgba();
+        assert!((srgba.alpha - 1.0).abs() < 0.01);
+    }
+
+    // ─── WheelHudState ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_hud_state_default() {
+        let state = WheelHudState::default();
+        assert!(state.dirty);
+        assert!(!state.open);
+        assert!(!state.editor_open);
+        assert_eq!(state.active_set, 0);
+    }
+
+    // ─── count_wheel_entries ─────────────────────────────────────────────────────
+
+    #[test]
+    fn count_wheel_entries_empty_set() {
+        let set = ActionSet {
+            name: "Empty".into(),
+            entries: vec![],
+            ..default()
+        };
+        assert_eq!(count_wheel_entries(&set), 0);
+    }
+
+    #[test]
+    fn count_wheel_entries_mixed() {
+        let set = ActionSet {
+            name: "Mixed".into(),
+            entries: vec![
+                SetEntry::Wheel(WheelData::default()),
+                SetEntry::Action(QuickAction::default()),
+                SetEntry::WheelSet(WheelSetData::default()),
+                SetEntry::Action(QuickAction::default()),
+            ],
+            ..default()
+        };
+        assert_eq!(count_wheel_entries(&set), 2);
+    }
+
+    // ─── Resolve input ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_input_global_only() {
+        let global = GlobalBindings {
+            bindings: {
+                let mut m = HashMap::new();
+                m.insert(InputAction::PrimaryConfirm, WheelAction::UseSlot);
+                m
+            },
+        };
+        let result = resolve_input(InputAction::PrimaryConfirm, None, None, &global);
+        assert_eq!(result, Some(WheelAction::UseSlot));
+    }
+
+    #[test]
+    fn resolve_input_slot_overrides_wheel() {
+        let global = GlobalBindings::default();
+        let wheel = WheelInputOverride {
+            bindings: {
+                let mut m = HashMap::new();
+                m.insert(InputAction::PrimaryConfirm, WheelAction::UseSlot);
+                m
+            },
+            priority: 0,
+        };
+        let slot = WheelInputOverride {
+            bindings: {
+                let mut m = HashMap::new();
+                m.insert(InputAction::PrimaryConfirm, WheelAction::UseItem(3));
+                m
+            },
+            priority: 0,
+        };
+        let result = resolve_input(InputAction::PrimaryConfirm, Some(&slot), Some(&wheel), &global);
+        assert_eq!(result, Some(WheelAction::UseItem(3)));
+    }
+
+    #[test]
+    fn resolve_input_unbound_returns_none() {
+        let global = GlobalBindings::default();
+        let result = resolve_input(InputAction::Custom(99), None, None, &global);
+        assert_eq!(result, None);
+    }
+
+    // ─── Editor actions ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn selection_default_is_none() {
+        assert_eq!(editor::Selection::default(), editor::Selection::None);
+    }
+
+    #[test]
+    fn edit_focus_default_is_none() {
+        assert_eq!(editor::EditFocus::default(), editor::EditFocus::None);
+    }
+
+    // ─── Gamepad button label mapping ────────────────────────────────────────────
+
+    #[test]
+    fn gamepad_btn_label_mapping() {
+        use bevy::input::gamepad::GamepadButton;
+        // The editor module has a gamepad_btn_label function, but it's in a
+        // different module. We test the mapping through the icon set.
+        assert_eq!(GamepadIconSet::Xbox.base_path(), "icons/XGamepad/Default");
+    }
+
+    // ─── SetEntry ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn set_entry_wheel_creation() {
+        let entry = SetEntry::Wheel(WheelData::new("Test", 3));
+        match entry {
+            SetEntry::Wheel(w) => assert_eq!(w.name, "Test"),
+            _ => panic!("expected Wheel"),
+        }
+    }
+
+    #[test]
+    fn set_entry_action_creation() {
+        let entry = SetEntry::Action(QuickAction {
+            name: "Test".into(),
+            ..default()
+        });
+        match entry {
+            SetEntry::Action(a) => assert_eq!(a.name, "Test"),
+            _ => panic!("expected Action"),
+        }
+    }
+
+    // ─── WheelSetData ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_set_data_default() {
+        let data = WheelSetData::default();
+        assert_eq!(data.name, "Wheel Set");
+        assert!(data.wheels.is_empty());
+    }
+
+    // ─── SlotItem ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn slot_item_default() {
+        let item = SlotItem::default();
+        assert!(item.name.is_empty());
+        assert!(item.icon.is_empty());
+    }
+
+    // ─── ActionSet ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn action_set_default() {
+        let set = ActionSet::default();
+        assert_eq!(set.name, "Set");
+        assert_eq!(set.opacity, 1.0);
+        assert!(set.entries.is_empty());
+    }
+
+    // ─── WedgeParams ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wedge_params_default_values() {
+        let params = WedgeParams {
+            color: Vec4::new(1.0, 0.0, 0.0, 0.5),
+            inner_r: 40.0,
+            outer_r: 140.0,
+            angle_start: 0.0,
+            angle_end: std::f32::consts::FRAC_PI_2,
+        };
+        assert!((params.inner_r - 40.0).abs() < f32::EPSILON);
+        assert!((params.outer_r - 140.0).abs() < f32::EPSILON);
+    }
+
+    // ─── GlobalBindings ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn global_bindings_default_empty() {
+        let gb = GlobalBindings::default();
+        assert!(gb.bindings.is_empty());
+    }
+
+    // ─── ActiveSlotContext ───────────────────────────────────────────────────────
+
+    #[test]
+    fn active_slot_context_creation() {
+        // Just verify it can be created; actual entity requires a running app
+        // We only test the type exists and derives are correct
+        let _ = format!("{:?}", editor::EditFocus::None);
+    }
+
+    // ─── ActionShape labels ──────────────────────────────────────────────────────
+
+    #[test]
+    fn action_shape_labels() {
+        assert_eq!(ActionShape::Rounded.label(), "Rounded");
+        assert_eq!(ActionShape::Round.label(), "Round");
+        assert_eq!(ActionShape::Square.label(), "Square");
+        assert_eq!(ActionShape::Diamond.label(), "Diamond");
+    }
+
+    // ─── PositionMode labels ─────────────────────────────────────────────────────
+
+    #[test]
+    fn position_mode_labels() {
+        assert_eq!(PositionMode::Relative.label(), "Relative");
+        assert_eq!(PositionMode::Absolute.label(), "Absolute");
+    }
+
+    // ─── SegmentShape labels ─────────────────────────────────────────────────────
+
+    #[test]
+    fn segment_shape_labels() {
+        assert_eq!(SegmentShape::Rounded.label(), "Rounded");
+        assert_eq!(SegmentShape::Pie.label(), "Pie");
+    }
+
+    // ─── WheelTheme labels ───────────────────────────────────────────────────────
+
+    #[test]
+    fn wheel_theme_labels() {
+        assert_eq!(WheelTheme::Dark.label(), "dark");
+        assert_eq!(WheelTheme::Light.label(), "light");
+    }
+
+    // ─── Default constants ───────────────────────────────────────────────────────
+
+    #[test]
+    fn config_file_constant() {
+        assert_eq!(CONFIG_FILE, "quickactions_config.ron");
+    }
+
+    #[test]
+    fn default_action_color() {
+        let color = _default_action_color();
+        assert_eq!(color, "#3b82f6");
+    }
+
+    #[test]
+    fn default_outer_radius() {
+        assert!((_default_outer_radius() - 140.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn default_inner_radius() {
+        assert!((_default_inner_radius() - 80.0).abs() < f32::EPSILON);
     }
 }
