@@ -163,10 +163,7 @@ fn handle_connection(stream: &mut TcpStream, root: &Path) {
     }
 
     // Parse path from "GET /path HTTP/1.1"
-    let raw_path = request_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/");
+    let raw_path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
     // Map the URL path to a filesystem path.
     // GitHub Pages serves files from a subdirectory matching the repo name.
@@ -189,10 +186,7 @@ fn handle_connection(stream: &mut TcpStream, root: &Path) {
 
     if fs_path.exists() && fs_path.is_file() {
         let data = fs::read(&fs_path).unwrap();
-        let ext = fs_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = fs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let mime = mime_for(ext);
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -287,9 +281,13 @@ fn wasm_deploy_smoke_test() {
     // Add the hashed JS and WASM files
     for name in &staged_names {
         if name.ends_with(".js") {
-            test_paths.push(Box::leak(format!("/{}/{}", REPO_NAME, name).into_boxed_str()));
+            test_paths.push(Box::leak(
+                format!("/{}/{}", REPO_NAME, name).into_boxed_str(),
+            ));
         } else if name.ends_with(".wasm") {
-            test_paths.push(Box::leak(format!("/{}/{}", REPO_NAME, name).into_boxed_str()));
+            test_paths.push(Box::leak(
+                format!("/{}/{}", REPO_NAME, name).into_boxed_str(),
+            ));
         }
     }
 

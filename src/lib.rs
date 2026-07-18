@@ -3773,7 +3773,7 @@ mod tests {
 
     #[test]
     fn casting_mode_hold_to_activate() {
-        match CastingMode::HoldToActivate { duration: 0.8 } {
+        match (CastingMode::HoldToActivate { duration: 0.8 }) {
             CastingMode::HoldToActivate { duration } => assert!((duration - 0.8).abs() < 1e-6),
             _ => panic!("expected HoldToActivate"),
         }
