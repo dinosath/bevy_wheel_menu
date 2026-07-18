@@ -1,6 +1,5 @@
 # cargo-deny configuration
 [advisories]
-vulnerability = "deny"
 ignore = [
     # ttf-parser is unmaintained — transitive dep via bevy, no direct control
     "RUSTSEC-2026-0192",
@@ -9,7 +8,6 @@ ignore = [
 ]
 
 [licenses]
-unlicensed = "deny"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -22,8 +20,6 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
-skip = []
-skip-tree = []
 
 [sources]
 unknown-git = "deny"

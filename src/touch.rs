@@ -19,6 +19,8 @@
 
 use bevy::input::touch::TouchPhase;
 use bevy::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsCast;
 
 /// Resource tracking active touch interactions with the HUD.
 #[derive(Resource, Default)]
@@ -288,27 +290,22 @@ pub fn detect_device_pixel_ratio(_config: ResMut<TouchConfig>) {
 pub fn prevent_default_touch_actions() {
     if let Some(window) = web_sys::window() {
         if let Some(document) = window.document() {
-            if let Some(canvas) = document.query_selector("canvas") {
-                if let Ok(Some(canvas)) = canvas {
-                    let closure = wasm_bindgen::Closure::<dyn FnMut(web_sys::TouchEvent)>::new(
-                        move |event: web_sys::TouchEvent| {
-                            event.prevent_default();
-                        },
-                    );
-                    canvas
-                        .add_event_listener_with_callback(
-                            "touchstart",
-                            closure.as_ref().unchecked_ref(),
-                        )
-                        .ok();
-                    canvas
-                        .add_event_listener_with_callback(
-                            "touchmove",
-                            closure.as_ref().unchecked_ref(),
-                        )
-                        .ok();
-                    closure.forget();
-                }
+            if let Ok(Some(canvas)) = document.query_selector("canvas") {
+                let closure = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::TouchEvent)>::new(
+                    move |event: web_sys::TouchEvent| {
+                        event.prevent_default();
+                    },
+                );
+                canvas
+                    .add_event_listener_with_callback(
+                        "touchstart",
+                        closure.as_ref().unchecked_ref(),
+                    )
+                    .ok();
+                canvas
+                    .add_event_listener_with_callback("touchmove", closure.as_ref().unchecked_ref())
+                    .ok();
+                closure.forget();
             }
         }
     }

@@ -1296,9 +1296,12 @@ dependencies = [
  "bevy",
  "bevy_feathers",
  "bevy_tweening",
+ "js-sys",
  "leafwing-input-manager",
  "ron",
  "serde",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

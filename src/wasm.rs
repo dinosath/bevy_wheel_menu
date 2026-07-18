@@ -205,7 +205,7 @@ pub fn exit_pointer_lock() {}
 #[cfg(target_arch = "wasm32")]
 pub fn get_device_pixel_ratio() -> f64 {
     web_sys::window()
-        .and_then(|w| w.device_pixel_ratio())
+        .map(|w| w.device_pixel_ratio())
         .unwrap_or(1.0)
 }
 
@@ -272,6 +272,7 @@ pub fn update_virtual_keyboard_state(
 #[cfg(target_arch = "wasm32")]
 pub mod audio {
     use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
 
     /// A thin wrapper around the Web Audio API for playing short sound effects.
     pub struct WasmAudio {
@@ -314,17 +315,21 @@ pub mod audio {
             let ctx_clone = ctx.clone();
             let url = url.to_string();
             wasm_bindgen_futures::spawn_local(async move {
-                let response =
-                    match web_sys::Window::fetch_with_str(&web_sys::window().unwrap_throw(), &url)
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(_) => return,
-                    };
-                let array_buffer = match response.array_buffer().await {
-                    Ok(b) => b,
+                let win = web_sys::window().unwrap_throw();
+                let promise = web_sys::Window::fetch_with_str(&win, &url);
+                let response = match wasm_bindgen_futures::JsFuture::from(promise).await {
+                    Ok(r) => r.unchecked_into::<web_sys::Response>(),
                     Err(_) => return,
                 };
+                let array_buffer_promise = match response.array_buffer() {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let array_buffer =
+                    match wasm_bindgen_futures::JsFuture::from(array_buffer_promise).await {
+                        Ok(b) => b.unchecked_into::<js_sys::ArrayBuffer>(),
+                        Err(_) => return,
+                    };
                 let audio_buffer = match ctx_clone.decode_audio_data(&array_buffer) {
                     Ok(b) => b,
                     Err(_) => return,
